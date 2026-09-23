@@ -12,7 +12,7 @@ from openpyxl.utils import get_column_letter
 # CONFIGURAÇÃO
 # ============================================================
 st.set_page_config(page_title="Boletim x Apura", layout="centered")
-st.title("📊 Apura Resultado: Análise")
+st.title("📊 Gerador de Boletim x Apura")
 st.markdown(
     "Faça o upload do boletim em PDF e da planilha de apuração, "
     "escolha a etapa e clique em **Processar**."
@@ -148,6 +148,14 @@ def parse_disciplinas_apura(s):
     return [disc_apura_para_pretty(d) for d in txt.split(";") if d.strip()]
 
 
+def _nome_aba_seguro(nome):
+    """Garante nome válido de sheet (≤31 chars, sem : \\ / ? * [ ])."""
+    nome = str(nome).strip() or "Turma"
+    for ch in [":", "\\", "/", "?", "*", "[", "]"]:
+        nome = nome.replace(ch, "-")
+    return nome[:31]
+
+
 # ============================================================
 # EXTRAÇÃO DO PDF
 # ============================================================
@@ -209,12 +217,228 @@ def gerar_boletim(df_aluno):
 
 
 # ============================================================
-# EXCEL ÚNICO: "Boletim x Apura"
+# DESENHO DE UM BLOCO DE ALUNO EM UMA ABA
+# ============================================================
+def _desenhar_bloco_aluno(ws, r_inicial, aba, reprovadas_norm,
+                          etapa_selecionada, formula_etapa, limiar,
+                          label_situacao, label_resultado, label_comparacao,
+                          estilos):
+    """
+    Desenha o bloco (cabeçalho + dados + rodapé) de um aluno a partir
+    de r_inicial (linha com 1 espaço em branco já contabilizado).
+    Retorna a próxima linha livre.
+    """
+    (
+        title_font, title_fill, hdr_fill, hdr_font,
+        sub_fill, sub_font, analysis_fill, analysis_font,
+        dark_fill, countif_fill, center, left, border,
+        apro_fill, rep_fill, orange_fill, gray_fill, yellow_fill,
+    ) = estilos
+
+    r = r_inicial + 1
+    topo = r
+
+    # ---------- Linha do topo ----------
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=9)
+    cell = ws.cell(row=r, column=1,
+                   value=f"MATRÍCULA: {aba['matricula']}   |   ALUNO: {aba['aluno']}   |   TURMA: {aba['turma']}")
+    cell.font = title_font
+    cell.fill = title_fill
+    cell.alignment = center
+
+    ws.merge_cells(start_row=r, start_column=10, end_row=r, end_column=11)
+    an = ws.cell(row=r, column=10, value="Análise do Boletim x Apura")
+    an.font = analysis_font
+    an.fill = analysis_fill
+    an.alignment = center
+
+    ws.cell(row=r, column=12).fill = analysis_fill
+
+    m_cell = ws.cell(row=r, column=13)
+    m_cell.font = Font(bold=True)
+    m_cell.alignment = center
+    m_cell.fill = countif_fill
+
+    for col in range(1, 14):
+        ws.cell(row=r, column=col).border = border
+
+    # ---------- Cabeçalhos ----------
+    r += 1
+    h1 = r
+    h2 = r + 1
+
+    ws.cell(row=h1, column=1, value="Disciplina")
+    ws.merge_cells(start_row=h1, start_column=1, end_row=h2, end_column=1)
+
+    ws.cell(row=h1, column=2, value="1ª Etapa – Média de 18 pontos")
+    ws.merge_cells(start_row=h1, start_column=2, end_row=h1, end_column=3)
+
+    ws.cell(row=h1, column=4, value="2ª Etapa – Média 21 pontos")
+    ws.merge_cells(start_row=h1, start_column=4, end_row=h1, end_column=5)
+
+    ws.cell(row=h1, column=6, value="3ª Etapa – Média 21 pontos")
+    ws.merge_cells(start_row=h1, start_column=6, end_row=h1, end_column=7)
+
+    ws.cell(row=h1, column=8, value="Soma das 3 etapas")
+    ws.merge_cells(start_row=h1, start_column=8, end_row=h1, end_column=9)
+
+    ws.cell(row=h1, column=10, value=label_situacao)
+    ws.merge_cells(start_row=h1, start_column=10, end_row=h2, end_column=10)
+
+    ws.cell(row=h1, column=11, value="Relatório do Apura")
+    ws.merge_cells(start_row=h1, start_column=11, end_row=h2, end_column=11)
+
+    ws.cell(row=h1, column=12, value=label_comparacao)
+    ws.merge_cells(start_row=h1, start_column=12, end_row=h2, end_column=12)
+
+    # M — SEM MERGE (evita conflito)
+
+    ws.cell(row=h2, column=2, value="Notas")
+    ws.cell(row=h2, column=3, value="Situação na 1ª Etapa")
+    ws.cell(row=h2, column=4, value="Notas")
+    ws.cell(row=h2, column=5, value="Situação")
+    ws.cell(row=h2, column=6, value="Notas")
+    ws.cell(row=h2, column=7, value="Situação")
+    ws.cell(row=h2, column=8, value="Notas")
+
+    for row in (h1, h2):
+        for col in range(1, 14):
+            c = ws.cell(row=row, column=col)
+            c.font = hdr_font if row == h1 else sub_font
+            c.fill = hdr_fill if row == h1 else sub_fill
+            c.alignment = center
+            c.border = border
+
+    for row in (h1, h2):
+        ws.cell(row=row, column=7).fill = gray_fill
+        ws.cell(row=row, column=9).fill = dark_fill
+        ws.cell(row=row, column=13).fill = dark_fill
+
+    r = h2 + 1
+    first_data = r
+
+    # ---------- Dados ----------
+    df = aba["df"]
+    for _, row in df.iterrows():
+        n1 = row["Nota 1ª"]
+        n2 = row["Nota 2ª"]
+        n3 = row["Nota 3ª"]
+
+        ws.cell(row=r, column=1, value=row["Disciplina"]).alignment = left
+
+        ws.cell(row=r, column=2, value=n1).number_format = "0.00"
+        c3 = ws.cell(row=r, column=3, value=row["Sit. 1ª"]); c3.alignment = center
+
+        ws.cell(row=r, column=4, value=n2).number_format = "0.00"
+        c5 = ws.cell(row=r, column=5, value=row["Sit. 2ª"]); c5.alignment = center
+
+        ws.cell(row=r, column=6, value=n3).number_format = "0.00"
+        c7 = ws.cell(row=r, column=7, value=row["Sit. 3ª"]); c7.alignment = center
+
+        soma_cell = ws.cell(row=r, column=8, value=f"=B{r}+D{r}+F{r}")
+        soma_cell.number_format = "0.00"
+        soma_cell.alignment = center
+
+        j_cell = ws.cell(row=r, column=10, value=formula_etapa.format(r=r))
+        j_cell.alignment = center
+
+        disc_norm = _norm(row["Disciplina"])
+        k_val = "Reprovado" if disc_norm in reprovadas_norm else "Aprovado"
+        k_cell = ws.cell(row=r, column=11, value=k_val)
+        k_cell.alignment = center
+        k_cell.fill = rep_fill if k_val == "Reprovado" else apro_fill
+
+        l_cell = ws.cell(row=r, column=12,
+                         value=f'=IF(J{r}=K{r},"Ok","Divergente")')
+        l_cell.alignment = center
+
+        if etapa_selecionada == "1ª Etapa":
+            soma_etapa = n1
+        elif etapa_selecionada == "2ª Etapa":
+            soma_etapa = n1 + n2
+        else:
+            soma_etapa = n1 + n2 + n3
+        j_result = "Aprovado" if soma_etapa >= limiar else "Reprovado"
+        if j_result != k_val:
+            l_cell.fill = yellow_fill
+
+        for cc, val in ((c3, row["Sit. 1ª"]), (c5, row["Sit. 2ª"]), (c7, row["Sit. 3ª"])):
+            if val == "Reprovado":
+                cc.fill = rep_fill
+            elif val == "Aprovado":
+                cc.fill = apro_fill
+            elif val == "—":
+                cc.fill = gray_fill
+
+        ws.cell(row=r, column=9).fill = dark_fill
+        ws.cell(row=r, column=9).border = border
+        ws.cell(row=r, column=9).alignment = center
+        ws.cell(row=r, column=13).fill = dark_fill
+        ws.cell(row=r, column=13).border = border
+        ws.cell(row=r, column=13).alignment = center
+
+        for col in range(1, 14):
+            ws.cell(row=r, column=col).border = border
+        r += 1
+
+    last_data = r - 1
+
+    # ---------- COUNTIF em M (linha topo) ----------
+    ws.cell(row=topo, column=13,
+            value=f'=COUNTIF(J{first_data}:J{last_data},"Reprovado")')
+
+    # ---------- Rodapé: Resultado ----------
+    ws.merge_cells(start_row=r, start_column=9, end_row=r, end_column=10)
+    rc = ws.cell(row=r, column=9, value=label_resultado)
+    rc.font = Font(bold=True)
+    rc.alignment = center
+
+    ws.merge_cells(start_row=r, start_column=11, end_row=r, end_column=13)
+    res_cell = ws.cell(
+        row=r, column=11,
+        value=(f'=IF(COUNTIF(J{first_data}:J{last_data},"Reprovado")>3,"Reprovado",'
+               f'IF(COUNTIF(J{first_data}:J{last_data},"Reprovado")>0,"Recuperação","Aprovado"))')
+    )
+    res_cell.alignment = center
+    res_cell.font = Font(bold=True)
+    for col in range(9, 14):
+        ws.cell(row=r, column=col).fill = orange_fill
+        ws.cell(row=r, column=col).border = border
+    r += 1
+
+    # ---------- Rodapé: Motivo ----------
+    ws.merge_cells(start_row=r, start_column=9, end_row=r, end_column=10)
+    mc = ws.cell(row=r, column=9, value="Motivo")
+    mc.font = Font(bold=True)
+    mc.alignment = center
+
+    ws.merge_cells(start_row=r, start_column=11, end_row=r, end_column=13)
+    mot_cell = ws.cell(
+        row=r, column=11,
+        value=(
+            f'=IF(COUNTIF(J{first_data}:J{last_data},"Reprovado")=0,"",'
+            f'IF(COUNTIF(J{first_data}:J{last_data},"Reprovado")>=4,"Mais que 3 disciplinas",'
+            f'IF(COUNTIF(J{first_data}:J{last_data},"Reprovado")=3,"3 disciplinas",'
+            f'IF(COUNTIF(J{first_data}:J{last_data},"Reprovado")=2,"2 disciplinas",'
+            f'IF(COUNTIF(J{first_data}:J{last_data},"Reprovado")=1,"1 disciplina","")))))'
+        )
+    )
+    mot_cell.alignment = center
+    for col in range(9, 14):
+        ws.cell(row=r, column=col).fill = orange_fill
+        ws.cell(row=r, column=col).border = border
+    r += 3
+
+    return r
+
+
+# ============================================================
+# EXCEL ÚNICO — uma aba por turma
 # ============================================================
 def gerar_excel_unico(planilhas, apura_map, etapa_selecionada="2ª Etapa"):
     wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Boletim x Apura"
+    # Remove a aba default
+    wb.remove(wb.active)
 
     # ---- Paleta ----
     title_font = Font(bold=True, size=11, color="FFFFFF")
@@ -240,6 +464,13 @@ def gerar_excel_unico(planilhas, apura_map, etapa_selecionada="2ª Etapa"):
     gray_fill = PatternFill("solid", fgColor="BFBFBF")
     yellow_fill = PatternFill("solid", fgColor="FFFF00")
 
+    estilos = (
+        title_font, title_fill, hdr_fill, hdr_font,
+        sub_fill, sub_font, analysis_fill, analysis_font,
+        dark_fill, countif_fill, center, left, border,
+        apro_fill, rep_fill, orange_fill, gray_fill, yellow_fill,
+    )
+
     # ---- Fórmula da etapa ----
     formulas_etapa = {
         "1ª Etapa": '=IF(B{r}>=18,"Aprovado","Reprovado")',
@@ -259,220 +490,53 @@ def gerar_excel_unico(planilhas, apura_map, etapa_selecionada="2ª Etapa"):
         label_resultado = f"Resultado da {etapa_selecionada}"
         label_comparacao = f"Comparação: {etapa_selecionada} x Apura"
 
-    r = 1
-    for aba in planilhas:
-        r += 1
-        topo = r
+    # ---- Agrupa por turma ----
+    turmas = {}
+    for p in planilhas:
+        t = str(p["turma"]).strip() or "SEM TURMA"
+        turmas.setdefault(t, []).append(p)
 
-        # ---------- Linha do topo ----------
-        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=9)
-        cell = ws.cell(row=r, column=1,
-                       value=f"MATRÍCULA: {aba['matricula']}   |   ALUNO: {aba['aluno']}   |   TURMA: {aba['turma']}")
-        cell.font = title_font
-        cell.fill = title_fill
-        cell.alignment = center
+    # Ordena as turmas alfabeticamente
+    for turma_nome in sorted(turmas.keys()):
+        alunos_da_turma = turmas[turma_nome]
 
-        ws.merge_cells(start_row=r, start_column=10, end_row=r, end_column=11)
-        an = ws.cell(row=r, column=10, value="Análise do Boletim x Apura")
-        an.font = analysis_font
-        an.fill = analysis_fill
-        an.alignment = center
+        nome_aba = _nome_aba_seguro(turma_nome)
+        # Garante nome único
+        base = nome_aba
+        contador = 1
+        while nome_aba in wb.sheetnames:
+            contador += 1
+            sufixo = f"_{contador}"
+            nome_aba = (base[:31 - len(sufixo)] + sufixo)
+        ws = wb.create_sheet(title=nome_aba)
 
-        ws.cell(row=r, column=12).fill = analysis_fill
-
-        m_cell = ws.cell(row=r, column=13)
-        m_cell.font = Font(bold=True)
-        m_cell.alignment = center
-        m_cell.fill = countif_fill
-
-        for col in range(1, 14):
-            ws.cell(row=r, column=col).border = border
-
-        # ---------- Cabeçalhos ----------
-        r += 1
-        h1 = r
-        h2 = r + 1
-
-        ws.cell(row=h1, column=1, value="Disciplina")
-        ws.merge_cells(start_row=h1, start_column=1, end_row=h2, end_column=1)
-
-        ws.cell(row=h1, column=2, value="1ª Etapa – Média de 18 pontos")
-        ws.merge_cells(start_row=h1, start_column=2, end_row=h1, end_column=3)
-
-        ws.cell(row=h1, column=4, value="2ª Etapa – Média 21 pontos")
-        ws.merge_cells(start_row=h1, start_column=4, end_row=h1, end_column=5)
-
-        ws.cell(row=h1, column=6, value="3ª Etapa – Média 21 pontos")
-        ws.merge_cells(start_row=h1, start_column=6, end_row=h1, end_column=7)
-
-        ws.cell(row=h1, column=8, value="Soma das 3 etapas")
-        ws.merge_cells(start_row=h1, start_column=8, end_row=h1, end_column=9)
-
-        ws.cell(row=h1, column=10, value=label_situacao)
-        ws.merge_cells(start_row=h1, start_column=10, end_row=h2, end_column=10)
-
-        ws.cell(row=h1, column=11, value="Relatório do Apura")
-        ws.merge_cells(start_row=h1, start_column=11, end_row=h2, end_column=11)
-
-        ws.cell(row=h1, column=12, value=label_comparacao)
-        ws.merge_cells(start_row=h1, start_column=12, end_row=h2, end_column=12)
-
-        # M — SEM MERGE (evita conflito)
-
-        ws.cell(row=h2, column=2, value="Notas")
-        ws.cell(row=h2, column=3, value="Situação na 1ª Etapa")
-        ws.cell(row=h2, column=4, value="Notas")
-        ws.cell(row=h2, column=5, value="Situação")
-        ws.cell(row=h2, column=6, value="Notas")
-        ws.cell(row=h2, column=7, value="Situação")
-        ws.cell(row=h2, column=8, value="Notas")
-
-        for row in (h1, h2):
-            for col in range(1, 14):
-                c = ws.cell(row=row, column=col)
-                c.font = hdr_font if row == h1 else sub_font
-                c.fill = hdr_fill if row == h1 else sub_fill
-                c.alignment = center
-                c.border = border
-
-        # Sobrescreve cores: G cinza claro, I e M escuro
-        for row in (h1, h2):
-            ws.cell(row=row, column=7).fill = gray_fill
-            ws.cell(row=row, column=9).fill = dark_fill
-            ws.cell(row=row, column=13).fill = dark_fill
-
-        r = h2 + 1
-        first_data = r
-
-        # ---------- Dados ----------
-        df = aba["df"]
-        mat_norm = str(aba["matricula"]).strip()
-        reprovadas_norm = apura_map.get(mat_norm, set())
-
-        for _, row in df.iterrows():
-            n1 = row["Nota 1ª"]
-            n2 = row["Nota 2ª"]
-            n3 = row["Nota 3ª"]
-
-            ws.cell(row=r, column=1, value=row["Disciplina"]).alignment = left
-
-            ws.cell(row=r, column=2, value=n1).number_format = "0.00"
-            c3 = ws.cell(row=r, column=3, value=row["Sit. 1ª"]); c3.alignment = center
-
-            ws.cell(row=r, column=4, value=n2).number_format = "0.00"
-            c5 = ws.cell(row=r, column=5, value=row["Sit. 2ª"]); c5.alignment = center
-
-            ws.cell(row=r, column=6, value=n3).number_format = "0.00"
-            c7 = ws.cell(row=r, column=7, value=row["Sit. 3ª"]); c7.alignment = center
-
-            soma_cell = ws.cell(row=r, column=8, value=f"=B{r}+D{r}+F{r}")
-            soma_cell.number_format = "0.00"
-            soma_cell.alignment = center
-
-            j_cell = ws.cell(row=r, column=10, value=formula_etapa.format(r=r))
-            j_cell.alignment = center
-
-            disc_norm = _norm(row["Disciplina"])
-            k_val = "Reprovado" if disc_norm in reprovadas_norm else "Aprovado"
-            k_cell = ws.cell(row=r, column=11, value=k_val)
-            k_cell.alignment = center
-            k_cell.fill = rep_fill if k_val == "Reprovado" else apro_fill
-
-            l_cell = ws.cell(row=r, column=12,
-                             value=f'=IF(J{r}=K{r},"Ok","Divergente")')
-            l_cell.alignment = center
-
-            # Destaca divergência em amarelo
-            if etapa_selecionada == "1ª Etapa":
-                soma_etapa = n1
-            elif etapa_selecionada == "2ª Etapa":
-                soma_etapa = n1 + n2
-            else:
-                soma_etapa = n1 + n2 + n3
-            j_result = "Aprovado" if soma_etapa >= limiar else "Reprovado"
-            if j_result != k_val:
-                l_cell.fill = yellow_fill
-
-            for cc, val in ((c3, row["Sit. 1ª"]), (c5, row["Sit. 2ª"]), (c7, row["Sit. 3ª"])):
-                if val == "Reprovado":
-                    cc.fill = rep_fill
-                elif val == "Aprovado":
-                    cc.fill = apro_fill
-                elif val == "—":
-                    cc.fill = gray_fill
-
-            # I e M — sem merge, apenas dark fill (barra escura visual)
-            ws.cell(row=r, column=9).fill = dark_fill
-            ws.cell(row=r, column=9).border = border
-            ws.cell(row=r, column=9).alignment = center
-            ws.cell(row=r, column=13).fill = dark_fill
-            ws.cell(row=r, column=13).border = border
-            ws.cell(row=r, column=13).alignment = center
-
-            for col in range(1, 14):
-                ws.cell(row=r, column=col).border = border
-            r += 1
-
-        last_data = r - 1
-
-        # ---------- COUNTIF em M (linha topo) ----------
-        ws.cell(row=topo, column=13,
-                value=f'=COUNTIF(J{first_data}:J{last_data},"Reprovado")')
-
-        # ---------- Rodapé: Resultado ----------
-        ws.merge_cells(start_row=r, start_column=9, end_row=r, end_column=10)
-        rc = ws.cell(row=r, column=9, value=label_resultado)
-        rc.font = Font(bold=True)
-        rc.alignment = center
-
-        ws.merge_cells(start_row=r, start_column=11, end_row=r, end_column=13)
-        res_cell = ws.cell(
-            row=r, column=11,
-            value=(f'=IF(COUNTIF(J{first_data}:J{last_data},"Reprovado")>3,"Reprovado",'
-                   f'IF(COUNTIF(J{first_data}:J{last_data},"Reprovado")>0,"Recuperação","Aprovado"))')
-        )
-        res_cell.alignment = center
-        res_cell.font = Font(bold=True)
-        for col in range(9, 14):
-            ws.cell(row=r, column=col).fill = orange_fill
-            ws.cell(row=r, column=col).border = border
-        r += 1
-
-        # ---------- Rodapé: Motivo ----------
-        ws.merge_cells(start_row=r, start_column=9, end_row=r, end_column=10)
-        mc = ws.cell(row=r, column=9, value="Motivo")
-        mc.font = Font(bold=True)
-        mc.alignment = center
-
-        ws.merge_cells(start_row=r, start_column=11, end_row=r, end_column=13)
-        mot_cell = ws.cell(
-            row=r, column=11,
-            value=(
-                f'=IF(COUNTIF(J{first_data}:J{last_data},"Reprovado")=0,"",'
-                f'IF(COUNTIF(J{first_data}:J{last_data},"Reprovado")>=4,"Mais que 3 disciplinas",'
-                f'IF(COUNTIF(J{first_data}:J{last_data},"Reprovado")=3,"3 disciplinas",'
-                f'IF(COUNTIF(J{first_data}:J{last_data},"Reprovado")=2,"2 disciplinas",'
-                f'IF(COUNTIF(J{first_data}:J{last_data},"Reprovado")=1,"1 disciplina","")))))'
+        r = 0  # começa em 0 porque o helper já faz `r_inicial + 1`
+        for aba in alunos_da_turma:
+            mat_norm = str(aba["matricula"]).strip()
+            reprovadas_norm = apura_map.get(mat_norm, set())
+            r = _desenhar_bloco_aluno(
+                ws, r, aba, reprovadas_norm,
+                etapa_selecionada, formula_etapa, limiar,
+                label_situacao, label_resultado, label_comparacao,
+                estilos,
             )
-        )
-        mot_cell.alignment = center
-        for col in range(9, 14):
-            ws.cell(row=r, column=col).fill = orange_fill
-            ws.cell(row=r, column=col).border = border
-        r += 3
 
-    # ---------- Larguras ----------
-    ws.column_dimensions["A"].width = 24
-    for col in ("B", "D", "F", "H"):
-        ws.column_dimensions[col].width = 9
-    for col in ("C", "E"):
-        ws.column_dimensions[col].width = 18
-    ws.column_dimensions["G"].width = 12
-    ws.column_dimensions["I"].width = 8
-    ws.column_dimensions["J"].width = 20
-    ws.column_dimensions["K"].width = 18
-    ws.column_dimensions["L"].width = 22
-    ws.column_dimensions["M"].width = 10
+        # ---- Larguras ----
+        ws.column_dimensions["A"].width = 24
+        for col in ("B", "D", "F", "H"):
+            ws.column_dimensions[col].width = 9
+        for col in ("C", "E"):
+            ws.column_dimensions[col].width = 18
+        ws.column_dimensions["G"].width = 12
+        ws.column_dimensions["I"].width = 8
+        ws.column_dimensions["J"].width = 20
+        ws.column_dimensions["K"].width = 18
+        ws.column_dimensions["L"].width = 22
+        ws.column_dimensions["M"].width = 10
+
+    # Se nenhuma turma foi criada, cria uma vazia
+    if not wb.sheetnames:
+        wb.create_sheet(title="Vazio")
 
     return wb
 
@@ -554,15 +618,21 @@ if processar and uploaded is not None and apura_uploaded is not None:
             "df": gerar_boletim(df_aluno),
         })
 
-    with st.spinner("Gerando Excel 'Boletim x Apura'..."):
+    with st.spinner("Gerando Excel 'Boletim x Apura' (uma aba por turma)..."):
         wb = gerar_excel_unico(planilhas, apura_map, etapa_selecionada=etapa_compare)
         buf = io.BytesIO()
         wb.save(buf)
         st.session_state["wb_bytes"] = buf.getvalue()
         st.session_state["n_alunos"] = len(planilhas)
         st.session_state["etapa_cache"] = etapa_compare
+        # Lista as turmas presentes
+        turmas_presentes = sorted({str(p["turma"]).strip() for p in planilhas})
+        st.session_state["turmas_cache"] = turmas_presentes
 
-    st.success(f"✅ Processamento concluído! {len(planilhas)} aluno(s) processado(s).")
+    st.success(
+        f"✅ Processamento concluído! {len(planilhas)} aluno(s) em "
+        f"{len(st.session_state['turmas_cache'])} turma(s)."
+    )
 
 # ============================================================
 # DOWNLOAD
@@ -574,6 +644,9 @@ if "wb_bytes" in st.session_state:
         f"Alunos: {st.session_state.get('n_alunos', 0)} — "
         f"Etapa analisada: **{st.session_state.get('etapa_cache','')}**"
     )
+    turmas = st.session_state.get("turmas_cache", [])
+    if turmas:
+        st.caption(f"Abas geradas (uma por turma): **{', '.join(turmas)}**")
 
     nome_arq = f"boletim_x_apura_{st.session_state.get('etapa_cache','').replace(' ', '_').replace('ª','a')}.xlsx"
     st.download_button(
