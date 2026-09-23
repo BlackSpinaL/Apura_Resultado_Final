@@ -12,7 +12,7 @@ from openpyxl.utils import get_column_letter
 # CONFIGURAÇÃO
 # ============================================================
 st.set_page_config(page_title="Boletim x Apura", layout="centered")
-st.title("📊 Gerador de Boletim x Apura")
+st.title("📊 Apura Resultado: Análise 📊")
 st.markdown(
     "Faça o upload do boletim em PDF e da planilha de apuração, "
     "escolha a etapa e clique em **Processar**."
