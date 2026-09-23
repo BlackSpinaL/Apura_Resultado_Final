@@ -6,6 +6,7 @@ import io
 import unicodedata
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
 # ============================================================
 # CONFIGURAÇÃO
@@ -13,8 +14,8 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 st.set_page_config(page_title="Boletim por Disciplina", layout="centered")
 st.title("📊 Gerador de Boletim em Excel")
 st.markdown(
-    "Faça o upload do boletim em PDF e, opcionalmente, da planilha de apuração "
-    "para gerar o arquivo de comparação."
+    "Faça o upload do boletim em PDF e da planilha de apuração, "
+    "escolha a etapa e clique em **Processar**."
 )
 
 # ============================================================
@@ -56,6 +57,21 @@ ETAPAS_CONFIG = {
     "3ª Etapa": {"max": 35, "min": 21},
 }
 MINIMO_TOTAL = 60
+
+ETAPA_LIMIARES = {
+    "1ª Etapa": 18,
+    "2ª Etapa": 39,
+    "3ª Etapa": 60,
+    "Soma das 3 Etapas": 60,
+}
+
+# Mapeamento: etapa → coluna da verificação (J=10, K=11, L=12, M=13)
+ETAPA_COLUNA = {
+    "1ª Etapa": 10,
+    "2ª Etapa": 11,
+    "3ª Etapa": 12,
+    "Soma das 3 Etapas": 13,
+}
 
 # ============================================================
 # REGEX
@@ -161,15 +177,50 @@ def gerar_boletim(df_aluno):
 
 
 # ============================================================
-# EXCEL — BOLETINS (formato SUGESTÃO)
+# HELPERS DE ESTILO
 # ============================================================
-def gerar_excel_unico(planilhas):
+def _style_range(ws, r1, c1, r2, c2, fill=None, border=None,
+                 alignment=None, font=None):
+    """Aplica estilo a um range retangular."""
+    for rr in range(r1, r2 + 1):
+        for cc in range(c1, c2 + 1):
+            cell = ws.cell(row=rr, column=cc)
+            if fill is not None:
+                cell.fill = fill
+            if border is not None:
+                cell.border = border
+            if alignment is not None:
+                cell.alignment = alignment
+            if font is not None:
+                cell.font = font
+
+
+def _aplicar_borda_amarela(ws, r1, c1, r2, c2):
+    """Aplica borda amarela grossa no perímetro do range."""
+    yellow = Side(style="medium", color="FFC000")
+    for rr in range(r1, r2 + 1):
+        for cc in range(c1, c2 + 1):
+            cell = ws.cell(row=rr, column=cc)
+            ex = cell.border
+            left = yellow if cc == c1 else ex.left
+            right = yellow if cc == c2 else ex.right
+            top = yellow if rr == r1 else ex.top
+            bottom = yellow if rr == r2 else ex.bottom
+            cell.border = Border(left=left, right=right, top=top, bottom=bottom)
+
+
+# ============================================================
+# EXCEL — BOLETINS (formato Sugestão)
+# ============================================================
+def gerar_excel_unico(planilhas, etapa_selecionada="2ª Etapa"):
     """
-    Gera Excel no formato da aba 'Sugestão':
-    - Colunas A-J: Disciplina | 1ª Etapa (Nota/Sit) | 2ª Etapa (Nota/Sit) | 3ª Etapa (Nota/Sit) | Soma
-    - Colunas J-M: Verificação por Etapa (1ª / 2ª / 3ª)
-    - Canto sup. direito: 'RELATÓRIO APURA' + =COUNTIF(...)
-    - Rodapé: Resultado + Motivo (com fórmulas)
+    Gera Excel no formato da 'Sugestão':
+    - Colunas A-J: boletim padrão
+    - Colunas J-M: Verificação por Etapa (só a etapa escolhida tem dado)
+    - Borda amarela ao redor da área de verificação
+    - Linha 'Resultado' com fundo laranja
+    - Linha 'Motivo' com fundo cinza (em branco quando Aprovado)
+    - Canto sup. direito: 'RELATÓRIO APURA' + COUNTIF
     """
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -190,34 +241,74 @@ def gerar_excel_unico(planilhas):
     rec_fill = PatternFill("solid", fgColor="FFC7CE")
     rep_fill = PatternFill("solid", fgColor="FFC7CE")
 
+    # Cores do rodapé
+    orange_fill = PatternFill("solid", fgColor="FCE4D6")
+    gray_fill = PatternFill("solid", fgColor="D9D9D9")
+    orange_border = Border(
+        left=Side(style="thin", color="C55A11"),
+        right=Side(style="thin", color="C55A11"),
+        top=Side(style="thin", color="C55A11"),
+        bottom=Side(style="thin", color="C55A11"),
+    )
+    gray_border = Border(
+        left=Side(style="thin", color="808080"),
+        right=Side(style="thin", color="808080"),
+        top=Side(style="thin", color="808080"),
+        bottom=Side(style="thin", color="808080"),
+    )
+
+    # Coluna de verificação (J=10, K=11, L=12, M=13)
+    col_verif = ETAPA_COLUNA.get(etapa_selecionada, 11)
+    col_verif_letter = get_column_letter(col_verif)
+
+    # Fórmulas para cada etapa
+    formulas_etapa = {
+        "1ª Etapa": '=IF(B{r}>=18,"Aprovado","Reprovado")',
+        "2ª Etapa": '=IF(B{r}+D{r}>=39,"Aprovado","Reprovado")',
+        "3ª Etapa": '=IF(B{r}+D{r}+F{r}>=60,"Aprovado","Reprovado")',
+        "Soma das 3 Etapas": '=IF(B{r}+D{r}+F{r}>=60,"Aprovado","Reprovado")',
+    }
+    formula_verif = formulas_etapa.get(etapa_selecionada, formulas_etapa["2ª Etapa"])
+
+    # Rótulo "Resultado da Xª etapa"
+    if etapa_selecionada == "1ª Etapa":
+        resultado_label = "Resultado da 1ª etapa"
+    elif etapa_selecionada == "2ª Etapa":
+        resultado_label = "Resultado da 2ª etapa"
+    elif etapa_selecionada == "3ª Etapa":
+        resultado_label = "Resultado da 3ª etapa"
+    else:
+        resultado_label = "Resultado Final"
+
     r = 1
     for aba in planilhas:
         topo_bloco = r
 
-        # ---------- Linha 1: cabeçalho do aluno + RELATÓRIO APURA ----------
-        # A1:K1 mesclado
-        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=11)
+        # ---------- Linha 1 ----------
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=10)
         cell = ws.cell(row=r, column=1,
                        value=f"MATRÍCULA: {aba['matricula']}   |   ALUNO: {aba['aluno']}   |   TURMA: {aba['turma']}")
         cell.font = title_font
         cell.fill = title_fill
         cell.alignment = left
-        for col in range(1, 12):
+        for col in range(1, 11):
             ws.cell(row=r, column=col).border = border
 
-        # L1 = "RELATÓRIO APURA"
-        ws.cell(row=r, column=12, value="RELATÓRIO APURA").font = Font(bold=True, size=10)
-        ws.cell(row=r, column=12).alignment = center
+        # K1 = RELATÓRIO APURA
+        ws.cell(row=r, column=11, value="RELATÓRIO APURA").font = Font(bold=True, size=10)
+        ws.cell(row=r, column=11).alignment = center
+        ws.cell(row=r, column=11).border = border
         ws.cell(row=r, column=12).border = border
 
-        # M1 será preenchido com =COUNTIF() depois (precisa saber first/last data)
-        ws.cell(row=r, column=13).font = Font(bold=True)
-        ws.cell(row=r, column=13).alignment = center
-        ws.cell(row=r, column=13).border = border
+        # M1 será preenchido com COUNTIF (só aqui é definido o valor)
+        countif_cell = ws.cell(row=r, column=13)
+        countif_cell.font = Font(bold=True)
+        countif_cell.alignment = center
+        countif_cell.border = border
 
         r += 1
-        h1 = r          # linha de cabeçalho grande
-        h2 = r + 1      # linha de sub-cabeçalho
+        h1 = r          # linha 2 (cabeçalho grande)
+        h2 = r + 1      # linha 3 (sub-cabeçalho)
 
         # ---------- Cabeçalhos mesclados (linha h1) ----------
         ws.cell(row=h1, column=1, value="Disciplina")
@@ -232,7 +323,7 @@ def gerar_excel_unico(planilhas):
         ws.cell(row=h1, column=6, value="3ª Etapa – Média 21 pontos")
         ws.merge_cells(start_row=h1, start_column=6, end_row=h1, end_column=7)
 
-        ws.cell(row=h1, column=8, value="Soma 3 etapas")
+        ws.cell(row=h1, column=8, value="Soma das 3 etapas")
         ws.merge_cells(start_row=h1, start_column=8, end_row=h1, end_column=9)
 
         ws.cell(row=h1, column=10, value="Verificação por Etapa (Mínimo 60% acumulado)")
@@ -249,8 +340,8 @@ def gerar_excel_unico(planilhas):
         ws.cell(row=h2, column=10, value="Situação da 1ª Etapa")
         ws.cell(row=h2, column=11, value="Situação da 2ª Etapa")
         ws.cell(row=h2, column=12, value="Situação da 3ª Etapa")
+        ws.cell(row=h2, column=13, value="Situação Final de Ano")
 
-        # Aplicar estilos de cabeçalho
         for row in (h1, h2):
             for col in range(1, 14):
                 c = ws.cell(row=row, column=col)
@@ -267,31 +358,28 @@ def gerar_excel_unico(planilhas):
         for _, row in df.iterrows():
             ws.cell(row=r, column=1, value=row["Disciplina"]).alignment = left
 
-            # 1ª etapa
             ws.cell(row=r, column=2, value=row["Nota 1ª"]).number_format = "0.00"
             c3 = ws.cell(row=r, column=3, value=row["Sit. 1ª"]); c3.alignment = center
 
-            # 2ª etapa
             ws.cell(row=r, column=4, value=row["Nota 2ª"]).number_format = "0.00"
             c5 = ws.cell(row=r, column=5, value=row["Sit. 2ª"]); c5.alignment = center
 
-            # 3ª etapa
             ws.cell(row=r, column=6, value=row["Nota 3ª"]).number_format = "0.00"
             c7 = ws.cell(row=r, column=7, value=row["Sit. 3ª"]); c7.alignment = center
 
-            # Soma 3 etapas =B+D+F
+            # H = Soma das 3 etapas
             soma_cell = ws.cell(row=r, column=8, value=f"=B{r}+D{r}+F{r}")
             soma_cell.number_format = "0.00"
             soma_cell.alignment = center
 
-            # Verificação por etapa (J, K, L)
-            j_cell = ws.cell(row=r, column=10,
-                             value=f'=IF(B{r}>=18,"Aprovado","Reprovado")')
-            k_cell = ws.cell(row=r, column=11,
-                             value=f'=IF(B{r}+D{r}>=39,"Aprovado","Reprovado")')
-            l_cell = ws.cell(row=r, column=12,
-                             value=f'=IF(B{r}+D{r}+F{r}>=60,"Aprovado","Reprovado")')
-            for cc in (j_cell, k_cell, l_cell):
+            # Colunas de verificação J, K, L, M
+            # Só a coluna da etapa selecionada recebe fórmula; as outras recebem "---"
+            for col_idx in (10, 11, 12, 13):
+                if col_idx == col_verif:
+                    val = formula_verif.format(r=r)
+                else:
+                    val = "---"
+                cc = ws.cell(row=r, column=col_idx, value=val)
                 cc.alignment = center
 
             # Cores nas situações (C, E, G)
@@ -307,51 +395,53 @@ def gerar_excel_unico(planilhas):
 
         last_data = r - 1
 
-        # ---------- COUNTIF na M1 (referencia coluna K = 2ª etapa) ----------
+        # ---------- COUNTIF em M1 ----------
         ws.cell(row=topo_bloco, column=13,
-                value=f'=COUNTIF(K{first_data}:K{last_data},"Reprovado")')
+                value=f'=COUNTIF({col_verif_letter}{first_data}:{col_verif_letter}{last_data},"Reprovado")')
 
-        # ---------- Rodapé: Resultado ----------
+        # ---------- Borda amarela grossa ao redor da verificação (J2:M{last_data}) ----------
+        _aplicar_borda_amarela(ws, r1=h2, c1=10, r2=last_data, c2=13)
+
+        # ---------- Rodapé: Resultado da Xª etapa ----------
         ws.merge_cells(start_row=r, start_column=9, end_row=r, end_column=10)
-        rc = ws.cell(row=r, column=9, value="Resultado")
-        rc.font = Font(bold=True)
-        rc.alignment = center
-        rc.border = border
-        ws.cell(row=r, column=10).border = border
+        label_cell = ws.cell(row=r, column=9, value=resultado_label)
+        label_cell.font = Font(bold=True, size=10)
+        label_cell.alignment = center
 
         ws.merge_cells(start_row=r, start_column=11, end_row=r, end_column=13)
         res_cell = ws.cell(
             row=r, column=11,
-            value=f'=IF(M{topo_bloco}>3,"Reprovado",IF(M{topo_bloco}>0,"Recuperação","Aprovado"))'
+            value=(f'=IF(M{topo_bloco}>3,"Reprovado",'
+                   f'IF(M{topo_bloco}>0,"Recuperação","Aprovado"))')
         )
         res_cell.alignment = center
-        for col in range(11, 14):
-            ws.cell(row=r, column=col).border = border
+        res_cell.font = Font(bold=True)
+
+        # Fundo laranja em I:M
+        _style_range(ws, r, 9, r, 13, fill=orange_fill, border=orange_border)
         r += 1
 
         # ---------- Rodapé: Motivo ----------
         ws.merge_cells(start_row=r, start_column=9, end_row=r, end_column=10)
-        mc = ws.cell(row=r, column=9, value="Motivo")
-        mc.font = Font(bold=True)
-        mc.alignment = center
-        mc.border = border
-        ws.cell(row=r, column=10).border = border
+        mot_label = ws.cell(row=r, column=9, value="Motivo")
+        mot_label.font = Font(bold=True, size=10)
+        mot_label.alignment = center
 
         ws.merge_cells(start_row=r, start_column=11, end_row=r, end_column=13)
         mot_cell = ws.cell(
             row=r, column=11,
             value=(
-                f'=IF(COUNTIF(K{first_data}:K{last_data},"Reprovado")>=4,'
-                f'"Mais que 3 disciplinas",'
-                f'IF(COUNTIF(K{first_data}:K{last_data},"Reprovado")=3,"3 disciplinas",'
-                f'IF(COUNTIF(K{first_data}:K{last_data},"Reprovado")=2,"2 disciplinas",'
-                f'IF(COUNTIF(K{first_data}:K{last_data},"Reprovado")=1,"1 disciplina",'
-                f'"Nenhuma disciplina"))))'
+                f'=IF(COUNTIF({col_verif_letter}{first_data}:{col_verif_letter}{last_data},"Reprovado")=0,"",'
+                f'IF(COUNTIF({col_verif_letter}{first_data}:{col_verif_letter}{last_data},"Reprovado")>=4,"Mais que 3 disciplinas",'
+                f'IF(COUNTIF({col_verif_letter}{first_data}:{col_verif_letter}{last_data},"Reprovado")=3,"3 disciplinas",'
+                f'IF(COUNTIF({col_verif_letter}{first_data}:{col_verif_letter}{last_data},"Reprovado")=2,"2 disciplinas",'
+                f'IF(COUNTIF({col_verif_letter}{first_data}:{col_verif_letter}{last_data},"Reprovado")=1,"1 disciplina","")))))'
             )
         )
         mot_cell.alignment = center
-        for col in range(11, 14):
-            ws.cell(row=r, column=col).border = border
+
+        # Fundo cinza em I:M
+        _style_range(ws, r, 9, r, 13, fill=gray_fill, border=gray_border)
         r += 3   # espaço entre alunos
 
     # ---------- Larguras ----------
@@ -363,23 +453,15 @@ def gerar_excel_unico(planilhas):
     ws.column_dimensions["J"].width = 18
     ws.column_dimensions["K"].width = 18
     ws.column_dimensions["L"].width = 18
-    ws.column_dimensions["M"].width = 18
+    ws.column_dimensions["M"].width = 20
 
     ws.freeze_panes = "A3"
     return wb
 
 
 # ============================================================
-# COMPARAR APURA x BOLETIM
+# COMPARAÇÃO APURA x BOLETIM
 # ============================================================
-ETAPA_LIMIARES = {
-    "1ª Etapa": 18,
-    "2ª Etapa": 39,
-    "3ª Etapa": 60,
-    "Soma das 3 Etapas": 60,
-}
-
-
 def _norm(s):
     if s is None:
         return ""
@@ -545,7 +627,7 @@ def gerar_excel_comparacao(df_comp, etapa):
         "Soma": 9, "Limiar": 9, "Status": 18,
     }
     for j, col in enumerate(cols, start=1):
-        ws.column_dimensions[openpyxl.utils.get_column_letter(j)].width = larguras.get(col, 14)
+        ws.column_dimensions[get_column_letter(j)].width = larguras.get(col, 14)
 
     ws.freeze_panes = "A3"
 
@@ -582,7 +664,7 @@ def gerar_excel_comparacao(df_comp, etapa):
                 ws2.cell(row=i, column=len(resumo.columns)).fill = pend_fill
 
         for j, col in enumerate(resumo.columns, start=1):
-            ws2.column_dimensions[openpyxl.utils.get_column_letter(j)].width = \
+            ws2.column_dimensions[get_column_letter(j)].width = \
                 30 if col == "NOME ALUNO" else 18
 
     return wb
@@ -600,84 +682,123 @@ with col2:
     )
 
 etapa_compare = st.selectbox(
-    "🎯 Etapa para verificar na comparação:",
+    "🎯 Etapa para verificar (aparecerá como coluna única na verificação):",
     ["1ª Etapa", "2ª Etapa", "3ª Etapa", "Soma das 3 Etapas"],
     index=1,
     disabled=(uploaded is None or apura_uploaded is None),
 )
 
-if uploaded is None:
-    st.info("👈 Faça o upload do PDF do boletim para começar.")
-else:
+# ---------- Botão de processar ----------
+processar = st.button(
+    "🚀 Processar",
+    type="primary",
+    use_container_width=True,
+    disabled=(uploaded is None or apura_uploaded is None),
+    key="btn_processar",
+)
+
+if uploaded is None or apura_uploaded is None:
+    st.info("👈 Faça o upload do PDF do boletim **e** da planilha de apuração para habilitar o processamento.")
+
+# ============================================================
+# PROCESSAMENTO
+# ============================================================
+if processar and uploaded is not None and apura_uploaded is not None:
+    # ---------- 1) Extrai o PDF ----------
     with st.spinner("Processando o boletim..."):
         df_notas = extrair_dados_pdf(uploaded.getvalue())
 
     if df_notas.empty:
         st.error("❌ Nenhum dado pôde ser extraído do PDF.")
-    else:
-        # ---------- Boletim (formato Sugestão) ----------
-        planilhas = []
-        for (turma, mat, aluno), df_aluno in df_notas.groupby(
-            ["Turma", "Matrícula", "Aluno"], sort=False
-        ):
-            planilhas.append({
-                "matricula": mat, "aluno": aluno, "turma": turma,
-                "df": gerar_boletim(df_aluno),
-            })
-        wb = gerar_excel_unico(planilhas)
+        st.stop()
+
+    # ---------- 2) Gera o Excel dos boletins ----------
+    planilhas = []
+    for (turma, mat, aluno), df_aluno in df_notas.groupby(
+        ["Turma", "Matrícula", "Aluno"], sort=False
+    ):
+        planilhas.append({
+            "matricula": mat, "aluno": aluno, "turma": turma,
+            "df": gerar_boletim(df_aluno),
+        })
+
+    with st.spinner("Gerando Excel dos boletins..."):
+        wb = gerar_excel_unico(planilhas, etapa_selecionada=etapa_compare)
         buf = io.BytesIO()
         wb.save(buf)
+        st.session_state["wb_boletins_bytes"] = buf.getvalue()
+        st.session_state["n_alunos"] = len(planilhas)
 
-        st.success(f"✅ Boletim processado — {len(planilhas)} aluno(s) encontrado(s).")
-        st.download_button(
-            label="📥 Baixar Excel dos Boletins",
-            data=buf.getvalue(),
-            file_name="boletim_por_disciplina.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+    # ---------- 3) Gera a comparação ----------
+    try:
+        apura_df = pd.read_excel(apura_uploaded)
+    except Exception as e:
+        st.error(f"Erro ao ler a planilha de apuração: {e}")
+        st.stop()
+
+    obrig = {"MATRICULA", "NOME ALUNO", "RESULTADO", "DISCIPLINAS"}
+    faltando = obrig - set(apura_df.columns)
+    if faltando:
+        st.error(f"Colunas ausentes na planilha de apuração: {faltando}")
+        st.stop()
+
+    with st.spinner("Comparando disciplinas..."):
+        df_comp = gerar_comparacao(apura_df, df_notas, etapa_compare)
+
+    if df_comp.empty:
+        st.warning("Nenhuma comparação pôde ser gerada.")
+        st.stop()
+
+    with st.spinner("Gerando Excel da comparação..."):
+        wb_comp = gerar_excel_comparacao(df_comp, etapa_compare)
+        buf2 = io.BytesIO()
+        wb_comp.save(buf2)
+        st.session_state["df_comp_cache"] = df_comp
+        st.session_state["wb_comp_bytes"] = buf2.getvalue()
+        st.session_state["etapa_cache"] = etapa_compare
+        st.session_state["wb_comp_name"] = (
+            f"comparacao_apura_{etapa_compare.replace(' ', '_').replace('ª','a')}.xlsx"
         )
 
-        # ---------- Comparação Apura x Boletim ----------
-        if apura_uploaded is not None:
-            st.markdown("---")
-            st.subheader(f"🔍 Comparação com Apuração — {etapa_compare}")
+    st.success("✅ Processamento concluído!")
 
-            try:
-                apura_df = pd.read_excel(apura_uploaded)
-            except Exception as e:
-                st.error(f"Erro ao ler a planilha de apuração: {e}")
-                st.stop()
+# ============================================================
+# DOWNLOADS (persistem após processar)
+# ============================================================
+if "wb_boletins_bytes" in st.session_state:
+    st.markdown("---")
+    st.subheader("📄 Boletins (formato Sugestão)")
+    st.caption(f"Alunos processados: {st.session_state.get('n_alunos', 0)} — "
+               f"Etapa selecionada: **{st.session_state.get('etapa_cache','')}**")
+    st.download_button(
+        label="📥 Baixar Excel dos Boletins",
+        data=st.session_state["wb_boletins_bytes"],
+        file_name="boletim_por_disciplina.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        key="dl_boletins",
+    )
 
-            obrig = {"MATRICULA", "NOME ALUNO", "RESULTADO", "DISCIPLINAS"}
-            faltando = obrig - set(apura_df.columns)
-            if faltando:
-                st.error(f"Colunas ausentes na planilha de apuração: {faltando}")
-            else:
-                with st.spinner("Comparando disciplinas..."):
-                    df_comp = gerar_comparacao(apura_df, df_notas, etapa_compare)
+if "wb_comp_bytes" in st.session_state:
+    st.markdown("---")
+    st.subheader(f"🔍 Comparação com Apuração — {st.session_state['etapa_cache']}")
 
-                if df_comp.empty:
-                    st.warning("Nenhuma comparação pôde ser gerada.")
-                else:
-                    st.dataframe(df_comp, use_container_width=True, hide_index=True)
+    df_comp = st.session_state["df_comp_cache"]
+    st.dataframe(df_comp, use_container_width=True, hide_index=True)
 
-                    total = len(df_comp)
-                    ok = int((df_comp["Status"] == "REGULARIZADO").sum())
-                    pend = int((df_comp["Status"] == "PENDENTE").sum())
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("Total aluno-disciplina", total)
-                    c2.metric("✅ Regularizados", ok)
-                    c3.metric("⚠️ Pendentes", pend)
+    total = len(df_comp)
+    ok = int((df_comp["Status"] == "REGULARIZADO").sum())
+    pend = int((df_comp["Status"] == "PENDENTE").sum())
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total aluno-disciplina", total)
+    c2.metric("✅ Regularizados", ok)
+    c3.metric("⚠️ Pendentes", pend)
 
-                    wb_comp = gerar_excel_comparacao(df_comp, etapa_compare)
-                    buf2 = io.BytesIO()
-                    wb_comp.save(buf2)
-
-                    nome_arq = f"comparacao_apura_{etapa_compare.replace(' ', '_').replace('ª','a')}.xlsx"
-                    st.download_button(
-                        label=f"📥 Baixar Excel da Comparação ({etapa_compare})",
-                        data=buf2.getvalue(),
-                        file_name=nome_arq,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
-                    )
+    st.download_button(
+        label=f"📥 Baixar Excel da Comparação ({st.session_state['etapa_cache']})",
+        data=st.session_state["wb_comp_bytes"],
+        file_name=st.session_state["wb_comp_name"],
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        key="dl_comparacao",
+    )
