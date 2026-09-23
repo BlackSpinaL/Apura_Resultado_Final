@@ -12,7 +12,7 @@ from openpyxl.utils import get_column_letter
 # CONFIGURAÇÃO
 # ============================================================
 st.set_page_config(page_title="Boletim x Apura", layout="centered")
-st.title("📊 Gerador de Boletim x Apura")
+st.title("📊 Apura Resultado: Análise")
 st.markdown(
     "Faça o upload do boletim em PDF e da planilha de apuração, "
     "escolha a etapa e clique em **Processar**."
@@ -317,7 +317,7 @@ def gerar_excel_unico(planilhas, apura_map, etapa_selecionada="2ª Etapa"):
         ws.cell(row=h1, column=12, value=label_comparacao)
         ws.merge_cells(start_row=h1, start_column=12, end_row=h2, end_column=12)
 
-        ws.merge_cells(start_row=h1, start_column=13, end_row=h2, end_column=13)
+        # M — SEM MERGE (evita conflito)
 
         ws.cell(row=h2, column=2, value="Notas")
         ws.cell(row=h2, column=3, value="Situação na 1ª Etapa")
@@ -327,7 +327,6 @@ def gerar_excel_unico(planilhas, apura_map, etapa_selecionada="2ª Etapa"):
         ws.cell(row=h2, column=7, value="Situação")
         ws.cell(row=h2, column=8, value="Notas")
 
-        # ---------- Estilos dos cabeçalhos ----------
         for row in (h1, h2):
             for col in range(1, 14):
                 c = ws.cell(row=row, column=col)
@@ -336,11 +335,11 @@ def gerar_excel_unico(planilhas, apura_map, etapa_selecionada="2ª Etapa"):
                 c.alignment = center
                 c.border = border
 
-        # Sobrescreve cores específicas dos sub-cabeçalhos
+        # Sobrescreve cores: G cinza claro, I e M escuro
         for row in (h1, h2):
-            ws.cell(row=row, column=7).fill = gray_fill     # G = Situação 3ª
-        ws.cell(row=h2, column=9).fill = dark_fill          # I = vazio
-        ws.cell(row=h2, column=13).fill = dark_fill         # M = vazio
+            ws.cell(row=row, column=7).fill = gray_fill
+            ws.cell(row=row, column=9).fill = dark_fill
+            ws.cell(row=row, column=13).fill = dark_fill
 
         r = h2 + 1
         first_data = r
@@ -394,7 +393,6 @@ def gerar_excel_unico(planilhas, apura_map, etapa_selecionada="2ª Etapa"):
             if j_result != k_val:
                 l_cell.fill = yellow_fill
 
-            # Cores das situações
             for cc, val in ((c3, row["Sit. 1ª"]), (c5, row["Sit. 2ª"]), (c7, row["Sit. 3ª"])):
                 if val == "Reprovado":
                     cc.fill = rep_fill
@@ -403,11 +401,10 @@ def gerar_excel_unico(planilhas, apura_map, etapa_selecionada="2ª Etapa"):
                 elif val == "—":
                     cc.fill = gray_fill
 
-            # ** IMPORTANTE: estiliza I e M ANTES do merge **
+            # I e M — sem merge, apenas dark fill (barra escura visual)
             ws.cell(row=r, column=9).fill = dark_fill
             ws.cell(row=r, column=9).border = border
             ws.cell(row=r, column=9).alignment = center
-
             ws.cell(row=r, column=13).fill = dark_fill
             ws.cell(row=r, column=13).border = border
             ws.cell(row=r, column=13).alignment = center
@@ -418,14 +415,7 @@ def gerar_excel_unico(planilhas, apura_map, etapa_selecionada="2ª Etapa"):
 
         last_data = r - 1
 
-        # ---------- MERGE vertical em I e M (após estilizar tudo) ----------
-        if last_data > h2:
-            ws.merge_cells(start_row=h2, start_column=9,
-                           end_row=last_data, end_column=9)
-            ws.merge_cells(start_row=h2, start_column=13,
-                           end_row=last_data, end_column=13)
-
-        # ---------- COUNTIF em M1 ----------
+        # ---------- COUNTIF em M (linha topo) ----------
         ws.cell(row=topo, column=13,
                 value=f'=COUNTIF(J{first_data}:J{last_data},"Reprovado")')
 
