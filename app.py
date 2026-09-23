@@ -1,256 +1,683 @@
-"""
-app.py — Boletim Padrão (Streamlit)
-
-Faz upload do arquivo boletim_por_disciplina.xlsx (aba 'Boletins')
-e devolve um novo .xlsx com a aba padrão (formato Sugestão),
-com todos os alunos.
-"""
-
-import io
 import streamlit as st
-from openpyxl import load_workbook, Workbook
-from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+import pandas as pd
+import pdfplumber
+import re
+import io
+import unicodedata
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
-# =============================================================
-# CONFIG
-# =============================================================
-st.set_page_config(
-    page_title="Boletim Padrão",
-    page_icon="📘",
-    layout="wide",
+# ============================================================
+# CONFIGURAÇÃO
+# ============================================================
+st.set_page_config(page_title="Boletim por Disciplina", layout="centered")
+st.title("📊 Gerador de Boletim em Excel")
+st.markdown(
+    "Faça o upload do boletim em PDF e, opcionalmente, da planilha de apuração "
+    "para gerar o arquivo de comparação."
 )
 
-ABA_ENTRADA = "Boletins"
-ABA_SAIDA   = "Boletins"   # nome da aba final (padrão)
+# ============================================================
+# MAPEAMENTO DE DISCIPLINAS
+# ============================================================
+MAPA_DISCIPLINAS = {
+    "ARTE": "Arte",
+    "BIOLOGIA": "Biologia",
+    "BIOLOGIA NA PRATICA": "Biologia na Prática",
+    "C.DA NATUREZA P ENEM": "C. da Natureza P/ ENEM",
+    "CIENCIAS": "Ciências",
+    "DESENV. SUSTENTAVEL": "Desenv. Sustentável",
+    "ED. PARA PROFISSOES": "Ed. para Profissões",
+    "ED.FISICA NA PRATICA": "Ed. Física na Prática",
+    "ED.SOCIO.ENS.RELIG.": "Ed. Socio. Ens. Relig.",
+    "EDUCACAO FINANCEIRA": "Educação Financeira",
+    "EDUCACAO FISICA": "Educação Física",
+    "FILOSOFIA": "Filosofia",
+    "FISICA": "Física",
+    "GEOGRAFIA": "Geografia",
+    "HISTORIA": "História",
+    "L.INGLESA NA PRATICA": "L. Inglesa na Prática",
+    "LIN.PORTUGUESA": "Lin. Portuguesa",
+    "LIN.PORTUGUESA 2": "Lin. Portuguesa 2",
+    "LINGUA INGLESA": "Língua Inglesa",
+    "MAT.E ESTATISTICA": "Mat. e Estatística",
+    "MATEMATICA": "Matemática",
+    "OFICINA DE TEXTO": "Oficina de Texto",
+    "PROJETO DE VIDA": "Projeto de Vida",
+    "QUIMICA": "Química",
+    "QUIMICA NA PRATICA": "Química na Prática",
+    "SOCIOLOGIA": "Sociologia",
+}
+DISCIPLINAS_VALIDAS = sorted(MAPA_DISCIPLINAS.keys(), key=len, reverse=True)
+
+ETAPAS_CONFIG = {
+    "1ª Etapa": {"max": 30, "min": 18},
+    "2ª Etapa": {"max": 35, "min": 21},
+    "3ª Etapa": {"max": 35, "min": 21},
+}
+MINIMO_TOTAL = 60
+
+# ============================================================
+# REGEX
+# ============================================================
+PADRAO_LINHA = re.compile(
+    r'^(?P<nome>.+?)\s+(?P<n1>[\d,]+|-)\s+(?P<f1>\d+)\s+(?P<n2>[\d,]+|-)\s+(?P<f2>\d+)\s+'
+    r'(?P<n3>[\d,]+|-)\s+(?P<f3>\d+)\s+(?P<tn>[\d,]+|-)\s+(?P<tf>\d+)$'
+)
+PADRAO_RESTO = re.compile(
+    r'^([\d,]+|-)\s+(\d+)\s+([\d,]+|-)\s+(\d+)\s+([\d,]+|-)\s+(\d+)\s+([\d,]+|-)\s+(\d+)$'
+)
 
 
-# =============================================================
-# NÚCLEO — TRANSFORMAÇÃO
-# =============================================================
-def localizar_blocos(ws):
-    """Retorna [(linha_cabecalho, linha_resultado), ...] para cada aluno."""
-    blocos = []
-    for r in range(1, ws.max_row + 1):
-        v = ws.cell(row=r, column=1).value
-        if isinstance(v, str) and v.startswith("MATRÍCULA:"):
-            res_row = None
-            for rr in range(r, min(r + 60, ws.max_row + 1)):
-                for cc in range(1, ws.max_column + 1):
-                    if ws.cell(row=rr, column=cc).value == "Resultado":
-                        res_row = rr
-                        break
-                if res_row:
-                    break
-            if res_row:
-                blocos.append((r, res_row))
-    return blocos
+def _num(s):
+    return 0.0 if s == '-' else float(s.replace(',', '.'))
 
 
-def escrever_bloco(ws_out, out, ws_in, hrow, res_row):
-    d_start = hrow + 3
-    d_end   = res_row - 1
-    n_disc  = d_end - d_start + 1
-
-    # cabeçalho
-    ws_out.cell(row=out, column=1).value  = ws_in.cell(row=hrow, column=1).value
-    ws_out.cell(row=out, column=2).value  = ws_in.cell(row=hrow, column=2).value
-    ws_out.cell(row=out, column=3).value  = ws_in.cell(row=hrow, column=3).value
-    ws_out.cell(row=out, column=12).value = "RELATÓRIO APURA"
-    ws_out.cell(row=out, column=13).value = (
-        f'=COUNTIF(K{out+3}:K{out+3+n_disc-1},"Reprovado")'
-    )
-    ws_out.cell(row=out, column=14).value = "Situação - Final de Ano"
-
-    # títulos das etapas
-    ws_out.cell(row=out+1, column=1).value  = "Disciplina"
-    ws_out.cell(row=out+1, column=2).value  = "1ª Etapa – Média de 18 pontos"
-    ws_out.cell(row=out+1, column=4).value  = "2ª Etapa – Média 21 pontos"
-    ws_out.cell(row=out+1, column=6).value  = "3ª Etapa – Média 21 pontos"
-    ws_out.cell(row=out+1, column=8).value  = "Soma 3 etapas"
-    ws_out.cell(row=out+1, column=10).value = "Verificação por Etapa (Mínimo 60% acumulado)"
-
-    # sub-títulos
-    ws_out.cell(row=out+2, column=2).value  = "Notas"
-    ws_out.cell(row=out+2, column=3).value  = "Situação na 1ª Etapa"
-    ws_out.cell(row=out+2, column=4).value  = "Notas"
-    ws_out.cell(row=out+2, column=5).value  = "Situação"
-    ws_out.cell(row=out+2, column=6).value  = "Notas"
-    ws_out.cell(row=out+2, column=7).value  = "Situação"
-    ws_out.cell(row=out+2, column=8).value  = "Notas"
-    ws_out.cell(row=out+2, column=10).value = "Situação da 1ª Etapa"
-    ws_out.cell(row=out+2, column=11).value = "Situação da 2ª Etapa"
-    ws_out.cell(row=out+2, column=12).value = "Situação da 3ª Etapa"
-
-    # disciplinas
-    for i, sr in enumerate(range(d_start, d_end + 1)):
-        dr = out + 3 + i
-        ws_out.cell(row=dr, column=1).value  = ws_in.cell(row=sr, column=1).value
-        ws_out.cell(row=dr, column=2).value  = ws_in.cell(row=sr, column=2).value
-        ws_out.cell(row=dr, column=3).value  = ws_in.cell(row=sr, column=3).value
-        ws_out.cell(row=dr, column=4).value  = ws_in.cell(row=sr, column=4).value
-        ws_out.cell(row=dr, column=5).value  = ws_in.cell(row=sr, column=5).value
-        ws_out.cell(row=dr, column=6).value  = ws_in.cell(row=sr, column=6).value
-        ws_out.cell(row=dr, column=7).value  = ws_in.cell(row=sr, column=7).value
-        ws_out.cell(row=dr, column=8).value  = f"=B{dr}+D{dr}+F{dr}"
-        ws_out.cell(row=dr, column=10).value = "---"
-        ws_out.cell(row=dr, column=11).value = f'=IF(B{dr}+D{dr}>=39,"Aprovado","Reprovado")'
-        ws_out.cell(row=dr, column=12).value = "---"
-
-    # resultado / motivo
-    r_res = out + 3 + n_disc
-    r_mot = r_res + 1
-    k_start = out + 3
-    k_end   = out + 3 + n_disc - 1
-
-    ws_out.cell(row=r_res, column=9).value  = "Resultado"
-    ws_out.cell(row=r_res, column=11).value = (
-        f'=IF(M{out}>3,"Reprovado",IF(M{out}>0,"Recuperação","Aprovado"))'
-    )
-    ws_out.cell(row=r_mot, column=9).value  = "Motivo"
-    ws_out.cell(row=r_mot, column=11).value = (
-        f'=IF(COUNTIF(K{k_start}:K{k_end},"Reprovado")>=4,"Mais que 3 disciplinas",'
-        f'IF(COUNTIF(K{k_start}:K{k_end},"Reprovado")=3,"3 disciplinas",'
-        f'IF(COUNTIF(K{k_start}:K{k_end},"Reprovado")=2,"2 disciplinas",'
-        f'IF(COUNTIF(K{k_start}:K{k_end},"Reprovado")=1,"1 disciplina","Nenhuma disciplina"))))'
-    )
-    return r_mot + 3
+def extrair_linha(linha):
+    linha = linha.strip()
+    m = PADRAO_LINHA.match(linha)
+    if not m:
+        return None
+    nome_bruto = m.group('nome')
+    n1, f1 = _num(m.group('n1')), int(m.group('f1'))
+    n2, f2 = _num(m.group('n2')), int(m.group('f2'))
+    n3, f3 = _num(m.group('n3')), int(m.group('f3'))
+    tn, tf = _num(m.group('tn')), int(m.group('tf'))
+    if abs((n1 + n2 + n3) - tn) <= 0.02 and (f1 + f2 + f3) == tf:
+        return nome_bruto, n1, n2, n3
+    for disc in DISCIPLINAS_VALIDAS:
+        if linha.startswith(disc):
+            resto = linha[len(disc):].strip()
+            m2 = PADRAO_RESTO.match(resto)
+            if not m2:
+                continue
+            n1b, f1b = _num(m2.group(1)), int(m2.group(2))
+            n2b, f2b = _num(m2.group(3)), int(m2.group(4))
+            n3b, f3b = _num(m2.group(5)), int(m2.group(6))
+            tnb, tfb = _num(m2.group(7)), int(m2.group(8))
+            if abs((n1b + n2b + n3b) - tnb) <= 0.02 and (f1b + f2b + f3b) == tfb:
+                return disc, n1b, n2b, n3b
+    return None
 
 
-def aplicar_formatacao(ws_out, blocos_saida):
-    cor_cabecalho = PatternFill("solid", fgColor="1F4E78")
-    cor_etapa     = PatternFill("solid", fgColor="D9E1F2")
-    cor_sub       = PatternFill("solid", fgColor="EDEDED")
-    cor_result    = PatternFill("solid", fgColor="FFF2CC")
+# ============================================================
+# EXTRAÇÃO DO PDF
+# ============================================================
+@st.cache_data
+def extrair_dados_pdf(pdf_bytes):
+    dados = []
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        for pagina in pdf.pages:
+            try:
+                texto = pagina.extract_text()
+            except Exception:
+                continue
+            if not texto or len(texto.strip()) < 10:
+                continue
+            padrao_cabecalho = (
+                r"MATRÍCULA:\s*(\d+).*?ALUNO:\s*(.*?)\s*PERÍODO LETIVO:.*?TURMA:\s*(\d+)"
+            )
+            match = re.search(padrao_cabecalho, texto, re.DOTALL | re.IGNORECASE)
+            if not match:
+                continue
+            matricula = match.group(1)
+            nome = match.group(2).strip()
+            turma = match.group(3).strip()
+            for linha in texto.split('\n'):
+                if not any(linha.strip().startswith(d) for d in DISCIPLINAS_VALIDAS):
+                    continue
+                r = extrair_linha(linha)
+                if r is None:
+                    continue
+                disc, n1, n2, n3 = r
+                dados.append({
+                    "Turma": turma, "Matrícula": matricula, "Aluno": nome,
+                    "Disciplina": MAPA_DISCIPLINAS.get(disc, disc),
+                    "1ª Etapa": n1, "2ª Etapa": n2, "3ª Etapa": n3,
+                })
+    return pd.DataFrame(dados)
 
-    fonte_branca = Font(color="FFFFFF", bold=True)
-    fonte_bold   = Font(bold=True)
 
-    centralizado = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    esquerda     = Alignment(horizontal="left",   vertical="center")
+# ============================================================
+# SITUAÇÕES
+# ============================================================
+def sit_etapa(nota, etapa):
+    if nota is None or nota <= 0:
+        return "—"
+    return "Aprovado" if nota >= ETAPAS_CONFIG[etapa]["min"] else "Reprovado"
 
-    fino  = Side(border_style="thin", color="BFBFBF")
-    borda = Border(left=fino, right=fino, top=fino, bottom=fino)
 
-    for (h, res, mot, n) in blocos_saida:
-        d_start = h + 3
-        d_end   = h + 3 + n - 1
+def gerar_boletim(df_aluno):
+    linhas = []
+    for _, row in df_aluno.iterrows():
+        n1, n2, n3 = row["1ª Etapa"], row["2ª Etapa"], row["3ª Etapa"]
+        linhas.append({
+            "Disciplina": row["Disciplina"],
+            "Nota 1ª": n1, "Sit. 1ª": sit_etapa(n1, "1ª Etapa"),
+            "Nota 2ª": n2, "Sit. 2ª": sit_etapa(n2, "2ª Etapa"),
+            "Nota 3ª": n3, "Sit. 3ª": sit_etapa(n3, "3ª Etapa"),
+        })
+    return pd.DataFrame(linhas)
 
-        for c in (1, 2, 3, 12, 13, 14):
-            cel = ws_out.cell(row=h, column=c)
-            cel.fill = cor_cabecalho
-            cel.font = fonte_branca
-            cel.alignment = esquerda
 
-        for c in range(1, 15):
-            cel = ws_out.cell(row=h + 1, column=c)
-            cel.fill = cor_etapa
-            cel.font = fonte_bold
-            cel.alignment = centralizado
+# ============================================================
+# EXCEL — BOLETINS (formato SUGESTÃO)
+# ============================================================
+def gerar_excel_unico(planilhas):
+    """
+    Gera Excel no formato da aba 'Sugestão':
+    - Colunas A-J: Disciplina | 1ª Etapa (Nota/Sit) | 2ª Etapa (Nota/Sit) | 3ª Etapa (Nota/Sit) | Soma
+    - Colunas J-M: Verificação por Etapa (1ª / 2ª / 3ª)
+    - Canto sup. direito: 'RELATÓRIO APURA' + =COUNTIF(...)
+    - Rodapé: Resultado + Motivo (com fórmulas)
+    """
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Boletins"
 
-        for c in range(1, 15):
-            cel = ws_out.cell(row=h + 2, column=c)
-            cel.fill = cor_sub
-            cel.alignment = centralizado
+    # ---- Estilos ----
+    title_font = Font(bold=True, size=11, color="FFFFFF")
+    title_fill = PatternFill("solid", fgColor="1F4E78")
+    hdr_fill = PatternFill("solid", fgColor="1F4E78")
+    hdr_font = Font(bold=True, color="FFFFFF", size=11)
+    sub_fill = PatternFill("solid", fgColor="D9E1F2")
+    sub_font = Font(bold=True, size=10)
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    left = Alignment(horizontal="left", vertical="center")
+    thin = Side(style="thin", color="808080")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    apro_fill = PatternFill("solid", fgColor="C6EFCE")
+    rec_fill = PatternFill("solid", fgColor="FFC7CE")
+    rep_fill = PatternFill("solid", fgColor="FFC7CE")
 
-        for r in range(d_start, d_end + 1):
-            for c in range(1, 13):
-                ws_out.cell(row=r, column=c).border = borda
+    r = 1
+    for aba in planilhas:
+        topo_bloco = r
 
-        for r in (res, mot):
-            ws_out.cell(row=r, column=9).font  = fonte_bold
-            ws_out.cell(row=r, column=11).fill = cor_result
+        # ---------- Linha 1: cabeçalho do aluno + RELATÓRIO APURA ----------
+        # A1:K1 mesclado
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=11)
+        cell = ws.cell(row=r, column=1,
+                       value=f"MATRÍCULA: {aba['matricula']}   |   ALUNO: {aba['aluno']}   |   TURMA: {aba['turma']}")
+        cell.font = title_font
+        cell.fill = title_fill
+        cell.alignment = left
+        for col in range(1, 12):
+            ws.cell(row=r, column=col).border = border
+
+        # L1 = "RELATÓRIO APURA"
+        ws.cell(row=r, column=12, value="RELATÓRIO APURA").font = Font(bold=True, size=10)
+        ws.cell(row=r, column=12).alignment = center
+        ws.cell(row=r, column=12).border = border
+
+        # M1 será preenchido com =COUNTIF() depois (precisa saber first/last data)
+        ws.cell(row=r, column=13).font = Font(bold=True)
+        ws.cell(row=r, column=13).alignment = center
+        ws.cell(row=r, column=13).border = border
+
+        r += 1
+        h1 = r          # linha de cabeçalho grande
+        h2 = r + 1      # linha de sub-cabeçalho
+
+        # ---------- Cabeçalhos mesclados (linha h1) ----------
+        ws.cell(row=h1, column=1, value="Disciplina")
+        ws.merge_cells(start_row=h1, start_column=1, end_row=h2, end_column=1)
+
+        ws.cell(row=h1, column=2, value="1ª Etapa – Média de 18 pontos")
+        ws.merge_cells(start_row=h1, start_column=2, end_row=h1, end_column=3)
+
+        ws.cell(row=h1, column=4, value="2ª Etapa – Média 21 pontos")
+        ws.merge_cells(start_row=h1, start_column=4, end_row=h1, end_column=5)
+
+        ws.cell(row=h1, column=6, value="3ª Etapa – Média 21 pontos")
+        ws.merge_cells(start_row=h1, start_column=6, end_row=h1, end_column=7)
+
+        ws.cell(row=h1, column=8, value="Soma 3 etapas")
+        ws.merge_cells(start_row=h1, start_column=8, end_row=h1, end_column=9)
+
+        ws.cell(row=h1, column=10, value="Verificação por Etapa (Mínimo 60% acumulado)")
+        ws.merge_cells(start_row=h1, start_column=10, end_row=h1, end_column=13)
+
+        # ---------- Sub-cabeçalhos (linha h2) ----------
+        ws.cell(row=h2, column=2, value="Notas")
+        ws.cell(row=h2, column=3, value="Situação na 1ª Etapa")
+        ws.cell(row=h2, column=4, value="Notas")
+        ws.cell(row=h2, column=5, value="Situação")
+        ws.cell(row=h2, column=6, value="Notas")
+        ws.cell(row=h2, column=7, value="Situação")
+        ws.cell(row=h2, column=8, value="Notas")
+        ws.cell(row=h2, column=10, value="Situação da 1ª Etapa")
+        ws.cell(row=h2, column=11, value="Situação da 2ª Etapa")
+        ws.cell(row=h2, column=12, value="Situação da 3ª Etapa")
+
+        # Aplicar estilos de cabeçalho
+        for row in (h1, h2):
+            for col in range(1, 14):
+                c = ws.cell(row=row, column=col)
+                c.font = hdr_font if row == h1 else sub_font
+                c.fill = hdr_fill if row == h1 else sub_fill
+                c.alignment = center
+                c.border = border
+
+        r = h2 + 1
+        first_data = r
+
+        # ---------- Linhas de dados ----------
+        df = aba["df"]
+        for _, row in df.iterrows():
+            ws.cell(row=r, column=1, value=row["Disciplina"]).alignment = left
+
+            # 1ª etapa
+            ws.cell(row=r, column=2, value=row["Nota 1ª"]).number_format = "0.00"
+            c3 = ws.cell(row=r, column=3, value=row["Sit. 1ª"]); c3.alignment = center
+
+            # 2ª etapa
+            ws.cell(row=r, column=4, value=row["Nota 2ª"]).number_format = "0.00"
+            c5 = ws.cell(row=r, column=5, value=row["Sit. 2ª"]); c5.alignment = center
+
+            # 3ª etapa
+            ws.cell(row=r, column=6, value=row["Nota 3ª"]).number_format = "0.00"
+            c7 = ws.cell(row=r, column=7, value=row["Sit. 3ª"]); c7.alignment = center
+
+            # Soma 3 etapas =B+D+F
+            soma_cell = ws.cell(row=r, column=8, value=f"=B{r}+D{r}+F{r}")
+            soma_cell.number_format = "0.00"
+            soma_cell.alignment = center
+
+            # Verificação por etapa (J, K, L)
+            j_cell = ws.cell(row=r, column=10,
+                             value=f'=IF(B{r}>=18,"Aprovado","Reprovado")')
+            k_cell = ws.cell(row=r, column=11,
+                             value=f'=IF(B{r}+D{r}>=39,"Aprovado","Reprovado")')
+            l_cell = ws.cell(row=r, column=12,
+                             value=f'=IF(B{r}+D{r}+F{r}>=60,"Aprovado","Reprovado")')
+            for cc in (j_cell, k_cell, l_cell):
+                cc.alignment = center
+
+            # Cores nas situações (C, E, G)
+            for cc, val in ((c3, row["Sit. 1ª"]), (c5, row["Sit. 2ª"]), (c7, row["Sit. 3ª"])):
+                if val == "Reprovado":
+                    cc.fill = rep_fill
+                elif val == "Aprovado":
+                    cc.fill = apro_fill
+
+            for col in range(1, 14):
+                ws.cell(row=r, column=col).border = border
+            r += 1
+
+        last_data = r - 1
+
+        # ---------- COUNTIF na M1 (referencia coluna K = 2ª etapa) ----------
+        ws.cell(row=topo_bloco, column=13,
+                value=f'=COUNTIF(K{first_data}:K{last_data},"Reprovado")')
+
+        # ---------- Rodapé: Resultado ----------
+        ws.merge_cells(start_row=r, start_column=9, end_row=r, end_column=10)
+        rc = ws.cell(row=r, column=9, value="Resultado")
+        rc.font = Font(bold=True)
+        rc.alignment = center
+        rc.border = border
+        ws.cell(row=r, column=10).border = border
+
+        ws.merge_cells(start_row=r, start_column=11, end_row=r, end_column=13)
+        res_cell = ws.cell(
+            row=r, column=11,
+            value=f'=IF(M{topo_bloco}>3,"Reprovado",IF(M{topo_bloco}>0,"Recuperação","Aprovado"))'
+        )
+        res_cell.alignment = center
+        for col in range(11, 14):
+            ws.cell(row=r, column=col).border = border
+        r += 1
+
+        # ---------- Rodapé: Motivo ----------
+        ws.merge_cells(start_row=r, start_column=9, end_row=r, end_column=10)
+        mc = ws.cell(row=r, column=9, value="Motivo")
+        mc.font = Font(bold=True)
+        mc.alignment = center
+        mc.border = border
+        ws.cell(row=r, column=10).border = border
+
+        ws.merge_cells(start_row=r, start_column=11, end_row=r, end_column=13)
+        mot_cell = ws.cell(
+            row=r, column=11,
+            value=(
+                f'=IF(COUNTIF(K{first_data}:K{last_data},"Reprovado")>=4,'
+                f'"Mais que 3 disciplinas",'
+                f'IF(COUNTIF(K{first_data}:K{last_data},"Reprovado")=3,"3 disciplinas",'
+                f'IF(COUNTIF(K{first_data}:K{last_data},"Reprovado")=2,"2 disciplinas",'
+                f'IF(COUNTIF(K{first_data}:K{last_data},"Reprovado")=1,"1 disciplina",'
+                f'"Nenhuma disciplina"))))'
+            )
+        )
+        mot_cell.alignment = center
+        for col in range(11, 14):
+            ws.cell(row=r, column=col).border = border
+        r += 3   # espaço entre alunos
+
+    # ---------- Larguras ----------
+    ws.column_dimensions["A"].width = 24
+    for col in ("B", "D", "F", "H"):
+        ws.column_dimensions[col].width = 9
+    for col in ("C", "E", "G", "I"):
+        ws.column_dimensions[col].width = 20
+    ws.column_dimensions["J"].width = 18
+    ws.column_dimensions["K"].width = 18
+    ws.column_dimensions["L"].width = 18
+    ws.column_dimensions["M"].width = 18
+
+    ws.freeze_panes = "A3"
+    return wb
+
+
+# ============================================================
+# COMPARAR APURA x BOLETIM
+# ============================================================
+ETAPA_LIMIARES = {
+    "1ª Etapa": 18,
+    "2ª Etapa": 39,
+    "3ª Etapa": 60,
+    "Soma das 3 Etapas": 60,
+}
+
+
+def _norm(s):
+    if s is None:
+        return ""
+    try:
+        if isinstance(s, float) and pd.isna(s):
+            return ""
+    except Exception:
+        pass
+    s = str(s).strip().upper()
+    s = "".join(c for c in unicodedata.normalize("NFD", s)
+                if unicodedata.category(c) != "Mn")
+    return s
+
+
+def disc_apura_para_pretty(nome):
+    n = _norm(nome)
+    for k, v in MAPA_DISCIPLINAS.items():
+        if _norm(k) == n:
+            return v
+    for k, v in MAPA_DISCIPLINAS.items():
+        if _norm(v) == n:
+            return v
+    return str(nome).strip()
+
+
+def parse_disciplinas_apura(s):
+    if s is None:
+        return []
+    try:
+        if isinstance(s, float) and pd.isna(s):
+            return []
+    except Exception:
+        pass
+    txt = str(s).replace("|", ";").replace(",", ";")
+    return [disc_apura_para_pretty(d) for d in txt.split(";") if d.strip()]
+
+
+def soma_ate_etapa(row, etapa):
+    n1 = float(row.get("1ª Etapa") or 0)
+    n2 = float(row.get("2ª Etapa") or 0)
+    n3 = float(row.get("3ª Etapa") or 0)
+    if etapa == "1ª Etapa":
+        return n1
+    if etapa == "2ª Etapa":
+        return n1 + n2
+    return n1 + n2 + n3
+
+
+def gerar_comparacao(apura_df, boletim_df, etapa):
+    limiar = ETAPA_LIMIARES[etapa]
+
+    boletim_df = boletim_df.copy()
+    boletim_df["_mat"] = (boletim_df["Matrícula"].astype(str)
+                          .str.strip().str.replace(r"\.0$", "", regex=True))
+
+    resultados = []
+    for _, a in apura_df.iterrows():
+        matricula = str(a.get("MATRICULA", "")).strip().replace(".0", "")
+        nome = a.get("NOME ALUNO", "")
+        turma = a.get("TURMA", "")
+        resultado_apura = a.get("RESULTADO", "")
+        motivo = a.get("MOTIVO", "")
+        disciplinas = parse_disciplinas_apura(a.get("DISCIPLINAS", ""))
+
+        aluno_b = boletim_df[boletim_df["_mat"] == matricula]
+
+        if aluno_b.empty:
+            resultados.append({
+                "MATRICULA": matricula, "NOME ALUNO": nome, "TURMA": turma,
+                "RESULTADO APURA": resultado_apura, "MOTIVO APURA": motivo,
+                "DISCIPLINA": "(aluno não encontrado no boletim)",
+                "Nota 1ª": None, "Nota 2ª": None, "Nota 3ª": None,
+                "Soma": None, "Limiar": limiar, "Status": "SEM DADOS",
+            })
+            continue
+
+        for disc in disciplinas:
+            match = aluno_b[aluno_b["Disciplina"].apply(_norm) == _norm(disc)]
+            if match.empty:
+                resultados.append({
+                    "MATRICULA": matricula, "NOME ALUNO": nome, "TURMA": turma,
+                    "RESULTADO APURA": resultado_apura, "MOTIVO APURA": motivo,
+                    "DISCIPLINA": disc,
+                    "Nota 1ª": None, "Nota 2ª": None, "Nota 3ª": None,
+                    "Soma": None, "Limiar": limiar,
+                    "Status": "DISCIPLINA NÃO ENCONTRADA",
+                })
+                continue
+
+            r = match.iloc[0]
+            n1 = float(r.get("1ª Etapa") or 0)
+            n2 = float(r.get("2ª Etapa") or 0)
+            n3 = float(r.get("3ª Etapa") or 0)
+            soma = soma_ate_etapa(r, etapa)
+            status = "REGULARIZADO" if soma >= limiar else "PENDENTE"
+
+            resultados.append({
+                "MATRICULA": matricula, "NOME ALUNO": nome, "TURMA": turma,
+                "RESULTADO APURA": resultado_apura, "MOTIVO APURA": motivo,
+                "DISCIPLINA": disc,
+                "Nota 1ª": round(n1, 2),
+                "Nota 2ª": round(n2, 2),
+                "Nota 3ª": round(n3, 2),
+                "Soma": round(soma, 2),
+                "Limiar": limiar,
+                "Status": status,
+            })
+
+    return pd.DataFrame(resultados)
+
+
+def gerar_excel_comparacao(df_comp, etapa):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = f"Comparacao {etapa}"
+
+    title_font = Font(bold=True, size=12, color="FFFFFF")
+    title_fill = PatternFill("solid", fgColor="1F4E78")
+    hdr_font = Font(bold=True, color="FFFFFF", size=10)
+    hdr_fill = PatternFill("solid", fgColor="1F4E78")
+    ok_fill = PatternFill("solid", fgColor="C6EFCE")
+    pend_fill = PatternFill("solid", fgColor="FFC7CE")
+    warn_fill = PatternFill("solid", fgColor="FFEB9C")
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    left = Alignment(horizontal="left", vertical="center")
+    thin = Side(style="thin", color="808080")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    cols = list(df_comp.columns)
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(cols))
+    c = ws.cell(row=1, column=1,
+                value=f"COMPARAÇÃO APURA x BOLETIM — {etapa}  (Limiar: {ETAPA_LIMIARES[etapa]} pontos)")
+    c.font = title_font
+    c.fill = title_fill
+    c.alignment = center
+
+    for j, col in enumerate(cols, start=1):
+        cell = ws.cell(row=2, column=j, value=col)
+        cell.font = hdr_font
+        cell.fill = hdr_fill
+        cell.alignment = center
+        cell.border = border
+
+    for i, (_, row) in enumerate(df_comp.iterrows(), start=3):
+        for j, col in enumerate(cols, start=1):
+            cell = ws.cell(row=i, column=j, value=row[col])
+            cell.border = border
+            cell.alignment = center if col not in ("NOME ALUNO", "DISCIPLINA", "MOTIVO APURA") else left
+
+        st_idx = cols.index("Status") + 1
+        st_val = row["Status"]
+        if st_val == "REGULARIZADO":
+            ws.cell(row=i, column=st_idx).fill = ok_fill
+        elif st_val == "PENDENTE":
+            ws.cell(row=i, column=st_idx).fill = pend_fill
+        else:
+            ws.cell(row=i, column=st_idx).fill = warn_fill
 
     larguras = {
-        "A": 22, "B": 10, "C": 20, "D": 10, "E": 16, "F": 10, "G": 16,
-        "H": 12, "I": 3, "J": 12, "K": 22, "L": 18, "M": 14, "N": 22,
+        "MATRICULA": 12, "NOME ALUNO": 32, "TURMA": 10,
+        "RESULTADO APURA": 16, "MOTIVO APURA": 28, "DISCIPLINA": 22,
+        "Nota 1ª": 9, "Nota 2ª": 9, "Nota 3ª": 9,
+        "Soma": 9, "Limiar": 9, "Status": 18,
     }
-    for col, w in larguras.items():
-        ws_out.column_dimensions[col].width = w
+    for j, col in enumerate(cols, start=1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(j)].width = larguras.get(col, 14)
+
+    ws.freeze_panes = "A3"
+
+    if not df_comp.empty:
+        ws2 = wb.create_sheet("Resumo por Aluno")
+        resumo = (df_comp.groupby(["MATRICULA", "NOME ALUNO", "TURMA", "RESULTADO APURA"])
+                  .agg(
+                      Total_Disciplinas=("DISCIPLINA", "count"),
+                      Pendentes=("Status", lambda s: (s == "PENDENTE").sum()),
+                      Regularizadas=("Status", lambda s: (s == "REGULARIZADO").sum()),
+                  ).reset_index())
+        resumo["Situação"] = resumo.apply(
+            lambda r: "OK — APURA CONFIRMADA" if r["Pendentes"] == 0 else
+                      ("ATENÇÃO — AINDA PENDENTE" if r["Regularizadas"] > 0 else
+                       "AINDA REPROVADO"),
+            axis=1
+        )
+
+        for j, col in enumerate(resumo.columns, start=1):
+            hc = ws2.cell(row=1, column=j, value=col)
+            hc.font = hdr_font
+            hc.fill = hdr_fill
+            hc.alignment = center
+            hc.border = border
+
+        for i, (_, row) in enumerate(resumo.iterrows(), start=2):
+            for j, col in enumerate(resumo.columns, start=1):
+                cell = ws2.cell(row=i, column=j, value=row[col])
+                cell.border = border
+                cell.alignment = center if col != "NOME ALUNO" else left
+            if row["Pendentes"] == 0:
+                ws2.cell(row=i, column=len(resumo.columns)).fill = ok_fill
+            else:
+                ws2.cell(row=i, column=len(resumo.columns)).fill = pend_fill
+
+        for j, col in enumerate(resumo.columns, start=1):
+            ws2.column_dimensions[openpyxl.utils.get_column_letter(j)].width = \
+                30 if col == "NOME ALUNO" else 18
+
+    return wb
 
 
-def transformar_arquivo(arquivo_bytes):
-    """Recebe bytes de um .xlsx e devolve (bytes_saida, num_alunos)."""
-    wb_in = load_workbook(io.BytesIO(arquivo_bytes), data_only=False)
-
-    if ABA_ENTRADA not in wb_in.sheetnames:
-        raise ValueError(f"A aba '{ABA_ENTRADA}' não foi encontrada no arquivo.")
-
-    ws_in = wb_in[ABA_ENTRADA]
-
-    wb_out = Workbook()
-    ws_out = wb_out.active
-    ws_out.title = ABA_SAIDA
-    ws_out.sheet_view.showGridLines = False
-
-    blocos_in = localizar_blocos(ws_in)
-    if not blocos_in:
-        raise ValueError("Nenhum aluno encontrado. Verifique o formato do arquivo.")
-
-    out = 1
-    blocos_saida = []
-    for hrow, res_row in blocos_in:
-        n_disc = (res_row - 1) - (hrow + 3) + 1
-        proxima = escrever_bloco(ws_out, out, ws_in, hrow, res_row)
-        blocos_saida.append((out, out + 3 + n_disc, out + 3 + n_disc + 1, n_disc))
-        out = proxima
-
-    aplicar_formatacao(ws_out, blocos_saida)
-    ws_out.freeze_panes = "A2"
-
-    buf = io.BytesIO()
-    wb_out.save(buf)
-    buf.seek(0)
-    return buf.getvalue(), len(blocos_saida)
-
-
-# =============================================================
-# INTERFACE STREAMLIT
-# =============================================================
-st.title("📘 Boletim Padrão — Transformador")
-st.caption(
-    "Envie o arquivo `boletim_por_disciplina.xlsx` (aba **Boletins**) "
-    "e receba de volta o mesmo conteúdo no formato **padrão Sugestão**, "
-    "com todos os alunos."
-)
-
-with st.sidebar:
-    st.header("ℹ️ Como usar")
-    st.markdown(
-        "1. Clique em **Browse files** e envie o `.xlsx` original.\n"
-        "2. Aguarde o processamento.\n"
-        "3. Clique em **Baixar boletim_padrao.xlsx**.\n\n"
-        "O arquivo de saída contém **uma única aba** já no formato padrão, "
-        "pronta para impressão / BI."
+# ============================================================
+# INTERFACE
+# ============================================================
+col1, col2 = st.columns(2)
+with col1:
+    uploaded = st.file_uploader("📂 Upload do Boletim (PDF)", type="pdf", key="pdf")
+with col2:
+    apura_uploaded = st.file_uploader(
+        "📊 Upload da Apuração (Excel)", type=["xlsx", "xls"], key="apura"
     )
 
-arquivo = st.file_uploader(
-    "Selecione o arquivo Excel (.xlsx)",
-    type=["xlsx"],
-    accept_multiple_files=False,
+etapa_compare = st.selectbox(
+    "🎯 Etapa para verificar na comparação:",
+    ["1ª Etapa", "2ª Etapa", "3ª Etapa", "Soma das 3 Etapas"],
+    index=1,
+    disabled=(uploaded is None or apura_uploaded is None),
 )
 
-if arquivo is not None:
-    st.info(f"Arquivo recebido: **{arquivo.name}** ({arquivo.size / 1024:.1f} KB)")
+if uploaded is None:
+    st.info("👈 Faça o upload do PDF do boletim para começar.")
+else:
+    with st.spinner("Processando o boletim..."):
+        df_notas = extrair_dados_pdf(uploaded.getvalue())
 
-    if st.button("🚀 Processar", type="primary"):
-        try:
-            with st.spinner("Processando alunos..."):
-                bytes_saida, n_alunos = transformar_arquivo(arquivo.getvalue())
+    if df_notas.empty:
+        st.error("❌ Nenhum dado pôde ser extraído do PDF.")
+    else:
+        # ---------- Boletim (formato Sugestão) ----------
+        planilhas = []
+        for (turma, mat, aluno), df_aluno in df_notas.groupby(
+            ["Turma", "Matrícula", "Aluno"], sort=False
+        ):
+            planilhas.append({
+                "matricula": mat, "aluno": aluno, "turma": turma,
+                "df": gerar_boletim(df_aluno),
+            })
+        wb = gerar_excel_unico(planilhas)
+        buf = io.BytesIO()
+        wb.save(buf)
 
-            st.success(f"✅ {n_alunos} alunos processados com sucesso!")
+        st.success(f"✅ Boletim processado — {len(planilhas)} aluno(s) encontrado(s).")
+        st.download_button(
+            label="📥 Baixar Excel dos Boletins",
+            data=buf.getvalue(),
+            file_name="boletim_por_disciplina.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
 
-            nome_saida = "boletim_padrao.xlsx"
-            st.download_button(
-                label="⬇️ Baixar boletim_padrao.xlsx",
-                data=bytes_saida,
-                file_name=nome_saida,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
-            )
+        # ---------- Comparação Apura x Boletim ----------
+        if apura_uploaded is not None:
+            st.markdown("---")
+            st.subheader(f"🔍 Comparação com Apuração — {etapa_compare}")
 
-        except Exception as e:
-            st.error(f"❌ Erro ao processar o arquivo: {e}")
-            st.exception(e)
+            try:
+                apura_df = pd.read_excel(apura_uploaded)
+            except Exception as e:
+                st.error(f"Erro ao ler a planilha de apuração: {e}")
+                st.stop()
 
-st.divider()
-st.caption("Feito com Streamlit · openpyxl")
+            obrig = {"MATRICULA", "NOME ALUNO", "RESULTADO", "DISCIPLINAS"}
+            faltando = obrig - set(apura_df.columns)
+            if faltando:
+                st.error(f"Colunas ausentes na planilha de apuração: {faltando}")
+            else:
+                with st.spinner("Comparando disciplinas..."):
+                    df_comp = gerar_comparacao(apura_df, df_notas, etapa_compare)
+
+                if df_comp.empty:
+                    st.warning("Nenhuma comparação pôde ser gerada.")
+                else:
+                    st.dataframe(df_comp, use_container_width=True, hide_index=True)
+
+                    total = len(df_comp)
+                    ok = int((df_comp["Status"] == "REGULARIZADO").sum())
+                    pend = int((df_comp["Status"] == "PENDENTE").sum())
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Total aluno-disciplina", total)
+                    c2.metric("✅ Regularizados", ok)
+                    c3.metric("⚠️ Pendentes", pend)
+
+                    wb_comp = gerar_excel_comparacao(df_comp, etapa_compare)
+                    buf2 = io.BytesIO()
+                    wb_comp.save(buf2)
+
+                    nome_arq = f"comparacao_apura_{etapa_compare.replace(' ', '_').replace('ª','a')}.xlsx"
+                    st.download_button(
+                        label=f"📥 Baixar Excel da Comparação ({etapa_compare})",
+                        data=buf2.getvalue(),
+                        file_name=nome_arq,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                    )
