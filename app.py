@@ -226,7 +226,7 @@ def gerar_excel_unico(planilhas, apura_map, etapa_selecionada="2ª Etapa"):
 
     analysis_fill = PatternFill("solid", fgColor="404040")
     analysis_font = Font(bold=True, color="FFFFFF", size=10)
-    dark_fill = PatternFill("solid", fgColor="404040")   # Mesmo tom do "Análise"
+    dark_fill = PatternFill("solid", fgColor="404040")
     countif_fill = PatternFill("solid", fgColor="FFEB9C")
 
     center = Alignment(horizontal="center", vertical="center", wrap_text=True)
@@ -327,6 +327,7 @@ def gerar_excel_unico(planilhas, apura_map, etapa_selecionada="2ª Etapa"):
         ws.cell(row=h2, column=7, value="Situação")
         ws.cell(row=h2, column=8, value="Notas")
 
+        # ---------- Estilos dos cabeçalhos ----------
         for row in (h1, h2):
             for col in range(1, 14):
                 c = ws.cell(row=row, column=col)
@@ -335,12 +336,11 @@ def gerar_excel_unico(planilhas, apura_map, etapa_selecionada="2ª Etapa"):
                 c.alignment = center
                 c.border = border
 
-        # ---- Sombreamento escuro nos SUB-CABEÇALHOS de I e M ----
-        ws.cell(row=h2, column=9).fill = dark_fill
-        ws.cell(row=h2, column=13).fill = dark_fill
-        # Header G continua cinza claro
+        # Sobrescreve cores específicas dos sub-cabeçalhos
         for row in (h1, h2):
-            ws.cell(row=row, column=7).fill = gray_fill
+            ws.cell(row=row, column=7).fill = gray_fill     # G = Situação 3ª
+        ws.cell(row=h2, column=9).fill = dark_fill          # I = vazio
+        ws.cell(row=h2, column=13).fill = dark_fill         # M = vazio
 
         r = h2 + 1
         first_data = r
@@ -403,7 +403,14 @@ def gerar_excel_unico(planilhas, apura_map, etapa_selecionada="2ª Etapa"):
                 elif val == "—":
                     cc.fill = gray_fill
 
-            # NÃO preencher I e M aqui — serão mescladas depois
+            # ** IMPORTANTE: estiliza I e M ANTES do merge **
+            ws.cell(row=r, column=9).fill = dark_fill
+            ws.cell(row=r, column=9).border = border
+            ws.cell(row=r, column=9).alignment = center
+
+            ws.cell(row=r, column=13).fill = dark_fill
+            ws.cell(row=r, column=13).border = border
+            ws.cell(row=r, column=13).alignment = center
 
             for col in range(1, 14):
                 ws.cell(row=r, column=col).border = border
@@ -411,25 +418,12 @@ def gerar_excel_unico(planilhas, apura_map, etapa_selecionada="2ª Etapa"):
 
         last_data = r - 1
 
-        # ---------- MERGE vertical em I e M com sombreamento escuro ----------
+        # ---------- MERGE vertical em I e M (após estilizar tudo) ----------
         if last_data > h2:
-            # Coluna I (9)
             ws.merge_cells(start_row=h2, start_column=9,
                            end_row=last_data, end_column=9)
-            c_i = ws.cell(row=h2, column=9)
-            c_i.fill = dark_fill
-            c_i.alignment = center
-            # Coluna M (13)
             ws.merge_cells(start_row=h2, start_column=13,
                            end_row=last_data, end_column=13)
-            c_m = ws.cell(row=h2, column=13)
-            c_m.fill = dark_fill
-            c_m.alignment = center
-
-        # Bordas em todas as células mescladas
-        for rr in range(h2, last_data + 1):
-            ws.cell(row=rr, column=9).border = border
-            ws.cell(row=rr, column=13).border = border
 
         # ---------- COUNTIF em M1 ----------
         ws.cell(row=topo, column=13,
