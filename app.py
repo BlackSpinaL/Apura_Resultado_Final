@@ -12,7 +12,7 @@ from openpyxl.utils import get_column_letter
 # CONFIGURAÇÃO
 # ============================================================
 st.set_page_config(page_title="Boletim x Apura", layout="centered")
-st.title("📊 Apura Resultado - Análise")
+st.title("📊 Gerador de Boletim x Apura")
 st.markdown(
     "Faça o upload do boletim em PDF e da planilha de apuração, "
     "escolha a etapa e clique em **Processar**."
@@ -226,6 +226,7 @@ def gerar_excel_unico(planilhas, apura_map, etapa_selecionada="2ª Etapa"):
 
     analysis_fill = PatternFill("solid", fgColor="404040")
     analysis_font = Font(bold=True, color="FFFFFF", size=10)
+    dark_fill = PatternFill("solid", fgColor="404040")   # Mesmo tom do "Análise"
     countif_fill = PatternFill("solid", fgColor="FFEB9C")
 
     center = Alignment(horizontal="center", vertical="center", wrap_text=True)
@@ -236,8 +237,8 @@ def gerar_excel_unico(planilhas, apura_map, etapa_selecionada="2ª Etapa"):
     apro_fill = PatternFill("solid", fgColor="C6EFCE")
     rep_fill = PatternFill("solid", fgColor="FFC7CE")
     orange_fill = PatternFill("solid", fgColor="FCE4D6")
-    gray_fill = PatternFill("solid", fgColor="BFBFBF")      # sombreamento "sem dados"
-    yellow_fill = PatternFill("solid", fgColor="FFFF00")    # destaque "Divergente"
+    gray_fill = PatternFill("solid", fgColor="BFBFBF")
+    yellow_fill = PatternFill("solid", fgColor="FFFF00")
 
     # ---- Fórmula da etapa ----
     formulas_etapa = {
@@ -249,7 +250,6 @@ def gerar_excel_unico(planilhas, apura_map, etapa_selecionada="2ª Etapa"):
     formula_etapa = formulas_etapa.get(etapa_selecionada, formulas_etapa["2ª Etapa"])
     limiar = LIMIAR_ETAPA[etapa_selecionada]
 
-    # ---- Rótulos dinâmicos ----
     if etapa_selecionada == "Soma das 3 Etapas":
         label_situacao = "Situação Final"
         label_resultado = "Resultado Final"
@@ -335,13 +335,12 @@ def gerar_excel_unico(planilhas, apura_map, etapa_selecionada="2ª Etapa"):
                 c.alignment = center
                 c.border = border
 
-        # ---- Sombrear a coluna G (Situação 3ª) e I, M nos headers ----
-        # Coluna G na linha h2 (sub-cabeçalho "Situação" da 3ª)
-        # Coluna I nas duas linhas (h1 e h2)
+        # ---- Sombreamento escuro nos SUB-CABEÇALHOS de I e M ----
+        ws.cell(row=h2, column=9).fill = dark_fill
+        ws.cell(row=h2, column=13).fill = dark_fill
+        # Header G continua cinza claro
         for row in (h1, h2):
-            ws.cell(row=row, column=7).fill = gray_fill     # G
-            ws.cell(row=row, column=9).fill = gray_fill     # I
-            ws.cell(row=row, column=13).fill = gray_fill    # M
+            ws.cell(row=row, column=7).fill = gray_fill
 
         r = h2 + 1
         first_data = r
@@ -367,28 +366,24 @@ def gerar_excel_unico(planilhas, apura_map, etapa_selecionada="2ª Etapa"):
             ws.cell(row=r, column=6, value=n3).number_format = "0.00"
             c7 = ws.cell(row=r, column=7, value=row["Sit. 3ª"]); c7.alignment = center
 
-            # H = Soma
             soma_cell = ws.cell(row=r, column=8, value=f"=B{r}+D{r}+F{r}")
             soma_cell.number_format = "0.00"
             soma_cell.alignment = center
 
-            # J = fórmula da etapa
             j_cell = ws.cell(row=r, column=10, value=formula_etapa.format(r=r))
             j_cell.alignment = center
 
-            # K = Reprovado/Aprovado conforme apura
             disc_norm = _norm(row["Disciplina"])
             k_val = "Reprovado" if disc_norm in reprovadas_norm else "Aprovado"
             k_cell = ws.cell(row=r, column=11, value=k_val)
             k_cell.alignment = center
             k_cell.fill = rep_fill if k_val == "Reprovado" else apro_fill
 
-            # L = comparação (fórmula)
             l_cell = ws.cell(row=r, column=12,
                              value=f'=IF(J{r}=K{r},"Ok","Divergente")')
             l_cell.alignment = center
 
-            # ** Destacar em amarelo se a comparação for Divergente **
+            # Destaca divergência em amarelo
             if etapa_selecionada == "1ª Etapa":
                 soma_etapa = n1
             elif etapa_selecionada == "2ª Etapa":
@@ -399,7 +394,7 @@ def gerar_excel_unico(planilhas, apura_map, etapa_selecionada="2ª Etapa"):
             if j_result != k_val:
                 l_cell.fill = yellow_fill
 
-            # Cores nas situações das etapas
+            # Cores das situações
             for cc, val in ((c3, row["Sit. 1ª"]), (c5, row["Sit. 2ª"]), (c7, row["Sit. 3ª"])):
                 if val == "Reprovado":
                     cc.fill = rep_fill
@@ -408,9 +403,7 @@ def gerar_excel_unico(planilhas, apura_map, etapa_selecionada="2ª Etapa"):
                 elif val == "—":
                     cc.fill = gray_fill
 
-            # ** Sombrear coluna I (vazia) e coluna M (vazia) **
-            ws.cell(row=r, column=9).fill = gray_fill
-            ws.cell(row=r, column=13).fill = gray_fill
+            # NÃO preencher I e M aqui — serão mescladas depois
 
             for col in range(1, 14):
                 ws.cell(row=r, column=col).border = border
@@ -418,7 +411,27 @@ def gerar_excel_unico(planilhas, apura_map, etapa_selecionada="2ª Etapa"):
 
         last_data = r - 1
 
-        # ---------- COUNTIF em M2 ----------
+        # ---------- MERGE vertical em I e M com sombreamento escuro ----------
+        if last_data > h2:
+            # Coluna I (9)
+            ws.merge_cells(start_row=h2, start_column=9,
+                           end_row=last_data, end_column=9)
+            c_i = ws.cell(row=h2, column=9)
+            c_i.fill = dark_fill
+            c_i.alignment = center
+            # Coluna M (13)
+            ws.merge_cells(start_row=h2, start_column=13,
+                           end_row=last_data, end_column=13)
+            c_m = ws.cell(row=h2, column=13)
+            c_m.fill = dark_fill
+            c_m.alignment = center
+
+        # Bordas em todas as células mescladas
+        for rr in range(h2, last_data + 1):
+            ws.cell(row=rr, column=9).border = border
+            ws.cell(row=rr, column=13).border = border
+
+        # ---------- COUNTIF em M1 ----------
         ws.cell(row=topo, column=13,
                 value=f'=COUNTIF(J{first_data}:J{last_data},"Reprovado")')
 
@@ -542,7 +555,6 @@ if processar and uploaded is not None and apura_uploaded is not None:
         )
         st.stop()
 
-    # Mapa matrícula → disciplinas reprovadas
     apura_map = {}
     for _, a in apura_df.iterrows():
         mat = str(a.get("MATRICULA", "")).strip().replace(".0", "")
