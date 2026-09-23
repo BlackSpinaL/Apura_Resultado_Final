@@ -184,13 +184,20 @@ def gerar_boletim(df_aluno):
 
 
 # ============================================================
-# EXCEL — BOLETINS
+# EXCEL — BOLETINS (formato ARQUIVO FINAL com fórmulas)
 # ============================================================
 def gerar_excel_unico(planilhas):
+    """Gera Excel no formato ARQUIVO FINAL:
+    - Boletim padrão (colunas A-J)
+    - Colunas K/L/M com fórmulas de verificação por etapa
+    - Canto sup. direito: 'RELATÓRIO APURA' + COUNTIF
+    - Rodapé: Resultado + Motivo
+    """
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Boletins"
 
+    # ---- Estilos ----
     title_font = Font(bold=True, size=11, color="FFFFFF")
     title_fill = PatternFill("solid", fgColor="1F4E78")
     hdr_fill = PatternFill("solid", fgColor="1F4E78")
@@ -207,6 +214,9 @@ def gerar_excel_unico(planilhas):
 
     r = 1
     for aba in planilhas:
+        topo_bloco = r
+
+        # ---------- Linha 1: cabeçalho do aluno ----------
         ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=10)
         cell = ws.cell(row=r, column=1,
                        value=f"MATRÍCULA: {aba['matricula']}   |   ALUNO: {aba['aluno']}   |   TURMA: {aba['turma']}")
@@ -215,8 +225,13 @@ def gerar_excel_unico(planilhas):
         cell.alignment = left
         for col in range(1, 11):
             ws.cell(row=r, column=col).border = border
+
+        # "RELATÓRIO APURA" no canto sup. direito (K1)
+        ws.cell(row=r, column=11, value="RELATÓRIO APURA").font = Font(bold=True, size=10)
+        ws.cell(row=r, column=11).alignment = center
         r += 1
 
+        # ---------- Linhas 2 e 3: cabeçalhos ----------
         h1 = r
         h2 = r + 1
 
@@ -233,6 +248,9 @@ def gerar_excel_unico(planilhas):
         ws.cell(row=h1, column=10, value="Situação Geral")
         ws.merge_cells(start_row=h1, start_column=10, end_row=h2, end_column=10)
 
+        ws.cell(row=h1, column=11, value="Verificação por Etapa (Mínimo 60% acumulado)")
+        ws.merge_cells(start_row=h1, start_column=11, end_row=h1, end_column=13)
+
         ws.cell(row=h2, column=2, value="Notas")
         ws.cell(row=h2, column=3, value="Situação na 1ª Etapa")
         ws.cell(row=h2, column=4, value="Notas")
@@ -241,9 +259,12 @@ def gerar_excel_unico(planilhas):
         ws.cell(row=h2, column=7, value="Situação")
         ws.cell(row=h2, column=8, value="Notas")
         ws.cell(row=h2, column=9, value="Situação Final do Ano")
+        ws.cell(row=h2, column=11, value="Situação da 1ª Etapa")
+        ws.cell(row=h2, column=12, value="Situação da 2ª Etapa")
+        ws.cell(row=h2, column=13, value="Situação da 3ª Etapa")
 
         for row in (h1, h2):
-            for col in range(1, 11):
+            for col in range(1, 14):
                 c = ws.cell(row=row, column=col)
                 c.font = hdr_font if row == h1 else sub_font
                 c.fill = hdr_fill if row == h1 else sub_fill
@@ -251,9 +272,10 @@ def gerar_excel_unico(planilhas):
                 c.border = border
 
         r = h2 + 1
-
-        df = aba["df"]
         primeiro_dado = r
+
+        # ---------- Linhas de dados ----------
+        df = aba["df"]
         for _, row in df.iterrows():
             ws.cell(row=r, column=1, value=row["Disciplina"]).alignment = left
             ws.cell(row=r, column=2, value=row["Nota 1ª"]).number_format = "0.00"
@@ -262,7 +284,11 @@ def gerar_excel_unico(planilhas):
             c5 = ws.cell(row=r, column=5, value=row["Sit. 2ª"]); c5.alignment = center
             ws.cell(row=r, column=6, value=row["Nota 3ª"]).number_format = "0.00"
             c7 = ws.cell(row=r, column=7, value=row["Sit. 3ª"]); c7.alignment = center
-            ws.cell(row=r, column=8, value=row["Total"]).number_format = "0.00"
+
+            # Total = fórmula
+            hcell = ws.cell(row=r, column=8, value=f"=B{r}+D{r}+F{r}")
+            hcell.number_format = "0.00"
+            hcell.alignment = center
 
             sit_final = row["Situação Final"]
             cf = ws.cell(row=r, column=9, value=sit_final)
@@ -278,37 +304,90 @@ def gerar_excel_unico(planilhas):
                 elif val == "Aprovado":
                     cc.fill = apro_fill
 
-            for col in range(1, 11):
+            # Colunas K, L, M — fórmulas de verificação
+            k_cell = ws.cell(row=r, column=11,
+                             value=f'=IF(B{r}>=18,"Aprovado","Reprovado")')
+            l_cell = ws.cell(row=r, column=12,
+                             value=f'=IF(B{r}+D{r}>=39,"Aprovado","Reprovado")')
+            m_cell = ws.cell(row=r, column=13,
+                             value=f'=IF(B{r}+D{r}+F{r}>=60,"Aprovado","Reprovado")')
+            for cc in (k_cell, l_cell, m_cell):
+                cc.alignment = center
+
+            for col in range(1, 14):
                 ws.cell(row=r, column=col).border = border
             r += 1
 
         ultimo_dado = r - 1
 
-        if ultimo_dado > primeiro_dado:
+        # ---------- Situação Geral mesclada em J ----------
+        if ultimo_dado >= primeiro_dado:
             ws.merge_cells(start_row=primeiro_dado, start_column=10,
                            end_row=ultimo_dado, end_column=10)
-        cg = ws.cell(row=primeiro_dado, column=10, value=aba["situacao"])
-        cg.alignment = center
-        cg.font = Font(bold=True)
-        cg.border = border
-        for rr in range(primeiro_dado, ultimo_dado + 1):
-            ws.cell(row=rr, column=10).border = border
+            cg = ws.cell(row=primeiro_dado, column=10, value=aba["situacao"])
+            cg.alignment = center
+            cg.font = Font(bold=True)
+            for rr in range(primeiro_dado, ultimo_dado + 1):
+                ws.cell(row=rr, column=10).border = border
 
-        r += 2
+        # ---------- COUNTIF no topo direito (M1) ----------
+        countif_cell = ws.cell(
+            row=topo_bloco, column=13,
+            value=f'=COUNTIF(L{primeiro_dado}:L{ultimo_dado},"Reprovado")'
+        )
+        countif_cell.font = Font(bold=True)
+        countif_cell.alignment = center
+        countif_cell.border = border
 
+        # ---------- Rodapé: Resultado + Motivo ----------
+        ws.merge_cells(start_row=r, start_column=10, end_row=r, end_column=10)
+        rc = ws.cell(row=r, column=10, value="Resultado")
+        rc.font = Font(bold=True); rc.alignment = center; rc.border = border
+
+        ws.merge_cells(start_row=r, start_column=11, end_row=r, end_column=13)
+        res_cell = ws.cell(
+            row=r, column=11,
+            value=f'=IF(M{topo_bloco}>3,"Reprovado",IF(M{topo_bloco}>0,"Recuperação","Aprovado"))'
+        )
+        res_cell.alignment = center; res_cell.border = border
+        r += 1
+
+        ws.merge_cells(start_row=r, start_column=10, end_row=r, end_column=10)
+        mc = ws.cell(row=r, column=10, value="Motivo")
+        mc.font = Font(bold=True); mc.alignment = center; mc.border = border
+
+        ws.merge_cells(start_row=r, start_column=11, end_row=r, end_column=13)
+        mot_cell = ws.cell(
+            row=r, column=11,
+            value=(
+                f'=IF(COUNTIF(L{primeiro_dado}:L{ultimo_dado},"Reprovado")>=4,'
+                f'"Mais que 3 disciplinas",'
+                f'IF(COUNTIF(L{primeiro_dado}:L{ultimo_dado},"Reprovado")=3,"3 disciplinas",'
+                f'IF(COUNTIF(L{primeiro_dado}:L{ultimo_dado},"Reprovado")=2,"2 disciplinas",'
+                f'IF(COUNTIF(L{primeiro_dado}:L{ultimo_dado},"Reprovado")=1,"1 disciplina",'
+                f'"Nenhuma disciplina"))))'
+            )
+        )
+        mot_cell.alignment = center; mot_cell.border = border
+        r += 3
+
+    # ---- Larguras ----
     ws.column_dimensions["A"].width = 24
     for col in ("B", "D", "F", "H"):
         ws.column_dimensions[col].width = 9
     for col in ("C", "E", "G", "I"):
         ws.column_dimensions[col].width = 20
     ws.column_dimensions["J"].width = 22
+    ws.column_dimensions["K"].width = 18
+    ws.column_dimensions["L"].width = 18
+    ws.column_dimensions["M"].width = 18
 
     ws.freeze_panes = "A3"
     return wb
 
 
 # ============================================================
-# NOVA FUNCIONALIDADE: COMPARAR APURA x BOLETIM
+# COMPARAR APURA x BOLETIM
 # ============================================================
 ETAPA_LIMIARES = {
     "1ª Etapa": 18,
@@ -370,7 +449,8 @@ def gerar_comparacao(apura_df, boletim_df, etapa):
     limiar = ETAPA_LIMIARES[etapa]
 
     boletim_df = boletim_df.copy()
-    boletim_df["_mat"] = boletim_df["Matrícula"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+    boletim_df["_mat"] = (boletim_df["Matrícula"].astype(str)
+                          .str.strip().str.replace(r"\.0$", "", regex=True))
 
     resultados = []
     for _, a in apura_df.iterrows():
@@ -552,7 +632,7 @@ else:
     if df_notas.empty:
         st.error("❌ Nenhum dado pôde ser extraído do PDF.")
     else:
-        # ---------- Boletim (funcionalidade existente) ----------
+        # ---------- Boletim (formato ARQUIVO FINAL) ----------
         planilhas = []
         for (turma, mat, aluno), df_aluno in df_notas.groupby(
             ["Turma", "Matrícula", "Aluno"], sort=False
