@@ -729,19 +729,31 @@ if processar and uploaded is not None and apura_uploaded is not None:
         st.session_state["wb_boletins_bytes"] = buf.getvalue()
         st.session_state["n_alunos"] = len(planilhas)
 
-    # ---------- 3) Gera a comparação ----------
+    # ---------- 3) Lê a planilha de apuração (com normalização de colunas) ----------
     try:
         apura_df = pd.read_excel(apura_uploaded)
     except Exception as e:
         st.error(f"Erro ao ler a planilha de apuração: {e}")
         st.stop()
 
+    # Normaliza nomes das colunas: remove BOM, espaços extras e deixa UPPER
+    apura_df.columns = (
+        apura_df.columns.astype(str)
+        .str.replace("\ufeff", "", regex=False)
+        .str.strip()
+        .str.upper()
+    )
+
     obrig = {"MATRICULA", "NOME ALUNO", "RESULTADO", "DISCIPLINAS"}
     faltando = obrig - set(apura_df.columns)
     if faltando:
-        st.error(f"Colunas ausentes na planilha de apuração: {faltando}")
+        st.error(
+            f"❌ Colunas ausentes na planilha de apuração: **{sorted(faltando)}**\n\n"
+            f"Colunas encontradas: {sorted(apura_df.columns.tolist())}"
+        )
         st.stop()
 
+    # ---------- 4) Gera a comparação ----------
     with st.spinner("Comparando disciplinas..."):
         df_comp = gerar_comparacao(apura_df, df_notas, etapa_compare)
 
